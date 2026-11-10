@@ -130,7 +130,7 @@ mod tests {
     use super::*;
 
     fn doc_with(marks: Vec<usize>) -> Document {
-        Document { head_tail_marks: marks, channels: vec![vec![0.0; 1000]], ..Default::default() }
+        Document { head_tail_marks: marks, channels: vec![vec![0.0; 1000]].into(), ..Default::default() }
     }
 
     #[test]

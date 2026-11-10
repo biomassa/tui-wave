@@ -284,7 +284,7 @@ mod tests {
     fn ramp_doc(len: usize) -> Document {
         let a: Vec<f32> = (0..len).map(|i| i as f32 / len as f32).collect();
         let b: Vec<f32> = a.iter().map(|v| -v).collect();
-        Document { channels: vec![a, b], sample_rate: 44_100, ..Default::default() }
+        Document { channels: vec![a, b].into(), sample_rate: 44_100, ..Default::default() }
     }
 
     #[test]

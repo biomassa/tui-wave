@@ -326,7 +326,7 @@ mod tests {
 
             let doc = crate::model::io::load_wav(&streamed).unwrap();
             let mut src = Document::default();
-            src.channels = vec![samples.clone()];
+            src.channels = vec![samples.clone()].into();
             crate::model::io::save_wav_with(&src, &resident, depth, false).unwrap();
             let want = crate::model::io::load_wav(&resident).unwrap();
 

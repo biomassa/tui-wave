@@ -151,8 +151,8 @@ impl Command for ResampleCommand {
         // The original channels are moved into the undo snapshot rather than cloned: the
         // document gets new ones anyway, so a clone only added a third full copy at the peak.
         let original = std::mem::take(&mut doc.channels);
-        doc.channels = resample_channels(&original, ratio);
-        self.original = Some((original, doc.sample_rate, doc.markers.clone(), doc.head_tail_marks.clone()));
+        doc.channels = resample_channels(&original, ratio).into();
+        self.original = Some((original.into_inner(), doc.sample_rate, doc.markers.clone(), doc.head_tail_marks.clone()));
         // Marker positions are in samples, so they scale with the rate change.
         let new_len = doc.channels.first().map(|c| c.len()).unwrap_or(0);
         for m in &mut doc.markers {
@@ -173,7 +173,7 @@ impl Command for ResampleCommand {
 
     fn undo(&mut self, doc: &mut Document) {
         if let Some((channels, rate, markers, head_tail_marks)) = self.original.take() {
-            doc.channels = channels;
+            doc.channels = channels.into();
             doc.sample_rate = rate;
             doc.markers = markers;
             doc.head_tail_marks = head_tail_marks;
@@ -277,7 +277,7 @@ mod tests {
     fn resample_scales_head_tail_marks_and_undo_restores_them_exactly() {
         let mut doc = Document {
             head_tail_marks: vec![0, 11_025, 22_050, 44_099],
-            channels: vec![vec![0.0; 44_100]],
+            channels: vec![vec![0.0; 44_100]].into(),
             sample_rate: 44_100,
             ..Default::default()
         };
@@ -295,7 +295,7 @@ mod tests {
         Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels,
+            channels: channels.into(),
             sample_rate: rate,
             selection: None,
             cursor: 0,

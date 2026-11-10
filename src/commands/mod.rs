@@ -30,7 +30,7 @@ mod undo_accounting_tests {
     fn audio() -> Document {
         let mut doc = crate::model::io::load_wav("tests/fixtures/mono_sine.wav").unwrap();
         let ramp: Vec<f32> = (0..1000).map(|i| 0.1 + i as f32 / 2000.0).collect();
-        doc.channels = vec![ramp.clone(), ramp];
+        doc.channels = vec![ramp.clone(), ramp].into();
         doc.markers.clear();
         doc.head_tail_marks.clear();
         doc.original_channels.clear();
@@ -39,7 +39,7 @@ mod undo_accounting_tests {
 
     fn silence() -> Document {
         let mut doc = audio();
-        doc.channels = vec![vec![0.0; 1000]; 2];
+        doc.channels = vec![vec![0.0; 1000]; 2].into();
         doc
     }
 

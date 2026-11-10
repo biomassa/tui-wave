@@ -144,7 +144,7 @@ fn load_symphonia(path: &Path) -> color_eyre::Result<Document> {
     Ok(Document {
         original_channels: Vec::new(),
         head_tail_marks,
-        channels,
+        channels: channels.into(),
         sample_rate,
         bits_per_sample,
         selection: None,
@@ -216,7 +216,7 @@ pub fn load_wav(path: impl AsRef<Path>) -> color_eyre::Result<Document> {
     Ok(Document {
         original_channels: Vec::new(),
         head_tail_marks,
-        channels,
+        channels: channels.into(),
         sample_rate: info.sample_rate,
         bits_per_sample: info.bits_per_sample,
         selection: None,
@@ -411,6 +411,30 @@ pub fn save_wav(doc: &Document, path: impl AsRef<Path>) -> color_eyre::Result<()
 /// The largest `data` chunk `save_wav_with` gives to hound. 1MiB below `u32::MAX` leaves room
 /// for hound's header and for the marker and `bext` chunks appended after it.
 const HOUND_MAX_DATA_BYTES: u64 = u32::MAX as u64 - (1 << 20);
+
+/// Writes a scratch WAV for an external program (CDP, Praat) straight from borrowed channels.
+///
+/// The bytes are exactly what `save_wav_with` would write for a `Document` holding these
+/// channels (CDP binaries are particular about the header; see
+/// `wavwrite::write_hound_compatible`), but without what only a user's file needs: no copy
+/// into a `Document`, no staging file, `sync_all` or rename (the file lives in a temp
+/// directory that is deleted after the job), no marker chunks and no head/tail sidecar.
+/// Frames are counted from the first channel, as `Document::len_samples` does.
+pub(crate) fn write_temp_wav(
+    path: &Path,
+    planes: &[&[f32]],
+    sample_rate: u32,
+    depth: BitDepth,
+) -> color_eyre::Result<()> {
+    let spec = WavSpec {
+        channels: planes.len().max(1) as u16,
+        sample_rate,
+        bits_per_sample: depth.bits(),
+        sample_format: depth.sample_format(),
+    };
+    let frames = planes.first().map_or(0, |p| p.len());
+    super::wavwrite::write_hound_compatible(path, spec, planes, frames, depth, false)
+}
 
 /// Saves at the requested bit depth. Integer depths re-quantize from f32; `dither` adds
 /// TPDF noise before quantization to decorrelate quantization error (ignored for Float32).
@@ -673,7 +697,7 @@ mod tests {
         Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![samples],
+            channels: vec![samples].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -800,7 +824,8 @@ mod tests {
     fn a_save_past_the_hound_limit_round_trips_through_wavwrite() {
         use crate::model::document::Marker;
         let mut doc = approx_doc((0..3000).map(|i| (i as f32 / 3000.0) - 0.5).collect());
-        doc.channels.push(doc.channels[0].iter().map(|s| -s).collect());
+        let inverted = doc.channels[0].iter().map(|s| -s).collect();
+        doc.channels.push(inverted);
         doc.channels.push(vec![0.25; 3000]);
         doc.markers = vec![Marker { position: 1234, label: "Take 2".into() }];
         doc.bext = Some(vec![9, 8, 7]);

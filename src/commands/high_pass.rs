@@ -110,7 +110,7 @@ mod tests {
     const RATE: u32 = 48_000;
 
     fn doc_with(channels: Vec<Vec<f32>>) -> Document {
-        Document { channels, sample_rate: RATE, ..Default::default() }
+        Document { channels: channels.into(), sample_rate: RATE, ..Default::default() }
     }
 
     fn sine(freq: f32, len: usize) -> Vec<f32> {

@@ -93,7 +93,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![0.5, 0.3, 0.1]],
+            channels: vec![vec![0.5, 0.3, 0.1]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -116,7 +116,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![2.0, -2.0, 0.5]],
+            channels: vec![vec![2.0, -2.0, 0.5]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -141,7 +141,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![0.5, 0.3, 0.1]],
+            channels: vec![vec![0.5, 0.3, 0.1]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,

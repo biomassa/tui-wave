@@ -121,7 +121,7 @@ mod tests {
     fn trim_rebases_head_tail_marks_and_undo_restores_the_dropped_ones() {
         let mut doc = Document {
             head_tail_marks: vec![5, 25, 40, 90],
-            channels: vec![vec![0.0; 100]],
+            channels: vec![vec![0.0; 100]].into(),
             ..Default::default()
         };
         let mut cmd = TrimCommand::new(20, 50);
@@ -140,7 +140,7 @@ mod tests {
     fn undoing_a_trim_that_did_nothing_is_a_no_op() {
         let mut doc = Document {
             head_tail_marks: Vec::new(),
-            channels: vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]],
+            channels: vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]].into(),
             markers: vec![Marker { position: 2, label: "M".into() }],
             ..Default::default()
         };
@@ -160,7 +160,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]],
+            channels: vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -183,7 +183,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]],
+            channels: vec![vec![1.0, 2.0, 3.0, 4.0, 5.0]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -206,7 +206,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![1.0, 2.0, 3.0]],
+            channels: vec![vec![1.0, 2.0, 3.0]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,

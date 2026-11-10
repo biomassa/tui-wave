@@ -14,12 +14,32 @@ use std::time::Duration;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::model::cdp::pipeline::{parse_ana_decfactor, CLIP_HEADROOM_TARGET_PEAK, window_count_from_decfactor, PlannedJob, TempWavSpec};
-use crate::model::document::Document;
-use crate::model::io::{load_wav, save_wav_with, BitDepth};
+use crate::model::io::{load_wav, BitDepth};
 
-/// How often the runner polls a spawned child for exit while also checking for
+/// The longest the runner waits between checks of a spawned child for exit and for
 /// cancellation. Cheap and frequent enough that Esc feels instant.
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
+
+/// The poll interval for one child: 1 ms at first, doubling up to [`POLL_INTERVAL`].
+///
+/// A fixed 30 ms poll added ~15 ms on average to every step, and a spectral job on a
+/// multichannel selection has three steps per channel, most of them short. Starting small
+/// catches a short step almost as soon as it exits; a long step settles at the old interval, so
+/// cancel stays as responsive as it was. Shared with the Praat runner.
+pub(crate) struct PollBackoff(Duration);
+
+impl Default for PollBackoff {
+    fn default() -> Self {
+        PollBackoff(Duration::from_millis(1))
+    }
+}
+
+impl PollBackoff {
+    pub(crate) fn sleep(&mut self) {
+        thread::sleep(self.0);
+        self.0 = (self.0 * 2).min(POLL_INTERVAL);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobPurpose {
@@ -241,41 +261,133 @@ fn run_job_body(
     cancel: &AtomicBool,
     temp_dir: &Path,
 ) -> Result<JobOutput, CdpError> {
+    run_job_body_with(job, events, cancel, temp_dir, true)
+}
+
+/// `run_job_body`, with lane parallelism switchable so a test can compare the two.
+fn run_job_body_with(
+    job: &Job,
+    events: &Sender<CdpEvent>,
+    cancel: &AtomicBool,
+    temp_dir: &Path,
+    allow_parallel: bool,
+) -> Result<JobOutput, CdpError> {
     write_inputs(job, temp_dir)?;
     write_brk_files(job, temp_dir)?;
     write_binary_input_files(job, temp_dir)?;
 
-    let total = job.planned.steps.len();
-    for (index, step) in job.planned.steps.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(CdpError::Cancelled);
-        }
-
-        let mut args = step.args.clone();
-        resolve_deferred_window_param(job, index, temp_dir, &mut args)?;
-        if index == 1 {
-            resolve_matrix_gain_calibration(job, temp_dir)?;
-        }
-
-        let _ = events.send(CdpEvent::StepStarted {
-            job: job.id,
-            index,
-            total,
-            label: step.label.clone(),
-        });
-
-        run_step(&job.cdp_dir, &step.bin, &args, &step.label, temp_dir, cancel)?;
-
-        let output_path = temp_dir.join(&step.expected_output);
-        match std::fs::metadata(&output_path) {
-            Ok(meta) if meta.len() > 0 => {}
-            _ => return Err(CdpError::NoOutput { step: step.label.clone() }),
-        }
+    let lanes = if allow_parallel { crate::model::cdp::pipeline::independent_lanes(&job.planned) } else { None };
+    if let Some(lanes) = lanes {
+        run_lanes_in_parallel(job, &lanes, events, cancel, temp_dir)?;
+    } else {
+        run_steps_in_order(job, events, cancel, temp_dir)?;
     }
 
     let mut output = load_outputs(job, temp_dir)?;
     restore_clip_headroom(job, &mut output);
     Ok(output)
+}
+
+/// Runs lanes that share no files (`pipeline::independent_lanes`) on worker threads, each
+/// lane's steps in order. A 30-channel selection through a mono-only process is 30 lanes; run in
+/// series they used one core.
+///
+/// The first failure stops the others: it sets `abort`, which every running step treats like a
+/// cancel, and that failure is the one reported. A user cancel is reported as a cancel.
+fn run_lanes_in_parallel(
+    job: &Job,
+    lanes: &[Vec<usize>],
+    events: &Sender<CdpEvent>,
+    cancel: &AtomicBool,
+    temp_dir: &Path,
+) -> Result<(), CdpError> {
+    let total = job.planned.steps.len();
+    let next_lane = std::sync::atomic::AtomicUsize::new(0);
+    let abort = AtomicBool::new(false);
+    let first_error: std::sync::Mutex<Option<CdpError>> = std::sync::Mutex::new(None);
+    let workers = crate::model::par::worker_count(lanes.len());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                while let Some(lane) = lanes.get(next_lane.fetch_add(1, Ordering::Relaxed)) {
+                    for &index in lane {
+                        if cancel.load(Ordering::Relaxed) || abort.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        if let Err(e) = run_one_step(job, index, total, events, cancel, &abort, temp_dir) {
+                            let mut slot = first_error.lock().unwrap_or_else(|p| p.into_inner());
+                            // A step killed because another lane failed reports `Cancelled`;
+                            // keep the failure that caused it.
+                            if slot.is_none() && !(abort.load(Ordering::Relaxed) && matches!(e, CdpError::Cancelled)) {
+                                *slot = Some(e);
+                            }
+                            abort.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    if cancel.load(Ordering::Relaxed) {
+        return Err(CdpError::Cancelled);
+    }
+    match first_error.into_inner().unwrap_or_else(|p| p.into_inner()) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+fn run_steps_in_order(
+    job: &Job,
+    events: &Sender<CdpEvent>,
+    cancel: &AtomicBool,
+    temp_dir: &Path,
+) -> Result<(), CdpError> {
+    let total = job.planned.steps.len();
+    let no_abort = AtomicBool::new(false);
+    for index in 0..total {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CdpError::Cancelled);
+        }
+        if index == 1 {
+            resolve_matrix_gain_calibration(job, temp_dir)?;
+        }
+        run_one_step(job, index, total, events, cancel, &no_abort, temp_dir)?;
+    }
+    Ok(())
+}
+
+/// Runs step `index` and checks it produced its output.
+fn run_one_step(
+    job: &Job,
+    index: usize,
+    total: usize,
+    events: &Sender<CdpEvent>,
+    cancel: &AtomicBool,
+    abort: &AtomicBool,
+    temp_dir: &Path,
+) -> Result<(), CdpError> {
+    let step = &job.planned.steps[index];
+
+    let mut args = step.args.clone();
+    resolve_deferred_window_param(job, index, temp_dir, &mut args)?;
+
+    let _ = events.send(CdpEvent::StepStarted {
+        job: job.id,
+        index,
+        total,
+        label: step.label.clone(),
+    });
+
+    run_step(&job.cdp_dir, &step.bin, &args, &step.label, temp_dir, cancel, abort)?;
+
+    let output_path = temp_dir.join(&step.expected_output);
+    match std::fs::metadata(&output_path) {
+        Ok(meta) if meta.len() > 0 => {}
+        _ => return Err(CdpError::NoOutput { step: step.label.clone() }),
+    }
+    Ok(())
 }
 
 /// Undoes the `CLIP_HEADROOM_ATTENUATION` a `CLIP_HEADROOM_PROCESSES` job's inputs were
@@ -354,19 +466,18 @@ fn write_temp_wav_spec(
     bit_depth: BitDepth,
 ) -> Result<(), CdpError> {
     let source = job.inputs.get(spec.input_index).map(Vec::as_slice).unwrap_or(&[]);
-    let mut channels: Vec<Vec<f32>> =
-        spec.source_channels.iter().map(|&ch| source.get(ch).cloned().unwrap_or_default()).collect();
-    if let Some(gain) = spec.gain {
+    let pick = |ch: usize| source.get(ch).map_or(&[][..], Vec::as_slice);
+    // Written from the job's own buffers. Only a gain (matrix calibration) needs a scaled copy.
+    let gained: Option<Vec<Vec<f32>>> = spec.gain.map(|gain| {
         let gain = gain as f32;
-        for channel in &mut channels {
-            for sample in channel {
-                *sample *= gain;
-            }
-        }
-    }
-    let doc = Document { channels, sample_rate: job.input_sample_rate, ..Default::default() };
+        spec.source_channels.iter().map(|&ch| pick(ch).iter().map(|s| s * gain).collect()).collect()
+    });
+    let planes: Vec<&[f32]> = match &gained {
+        Some(channels) => channels.iter().map(Vec::as_slice).collect(),
+        None => spec.source_channels.iter().map(|&ch| pick(ch)).collect(),
+    };
     let path = temp_dir.join(&spec.relative_name);
-    save_wav_with(&doc, &path, bit_depth, false)
+    crate::model::io::write_temp_wav(&path, &planes, job.input_sample_rate, bit_depth)
         .map_err(|e| CdpError::Spawn { step: format!("write {}", spec.relative_name), message: e.to_string() })
 }
 
@@ -540,6 +651,7 @@ fn run_step(
     label: &str,
     temp_dir: &Path,
     cancel: &AtomicBool,
+    abort: &AtomicBool,
 ) -> Result<(), CdpError> {
     let bin_path = cdp_dir.join(bin);
     let mut child = StdCommand::new(&bin_path)
@@ -556,15 +668,16 @@ fn run_step(
     let stdout_handle = child.stdout.take().map(|s| thread::spawn(move || drain_lossy(s)));
     let stderr_handle = child.stderr.take().map(|s| thread::spawn(move || drain_lossy(s)));
 
+    let mut poll = PollBackoff::default();
     let status = loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) || abort.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(CdpError::Cancelled);
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) => thread::sleep(POLL_INTERVAL),
+            Ok(None) => poll.sleep(),
             Err(e) => {
                 return Err(CdpError::Spawn { step: label.to_string(), message: e.to_string() })
             }
@@ -708,7 +821,7 @@ fn load_glob_outputs(
             message: e.to_string(),
         })?;
         sample_rate = doc.sample_rate;
-        results.push(doc.channels);
+        results.push(doc.channels.into_inner());
     }
     if results.is_empty() {
         return Err(CdpError::NoOutput { step: format!("{}0.wav", glob.prefix) });
@@ -1094,7 +1207,7 @@ mod tests {
 
     fn mono_sine_channels() -> (Vec<Vec<f32>>, u32) {
         let doc = crate::model::io::load_wav("tests/fixtures/mono_sine.wav").unwrap();
-        (doc.channels, doc.sample_rate)
+        (doc.channels.to_vec(), doc.sample_rate)
     }
 
     #[test]
@@ -2330,7 +2443,7 @@ mod tests {
 
     fn stereo_sine_channels() -> (Vec<Vec<f32>>, u32) {
         let doc = crate::model::io::load_wav("tests/fixtures/stereo_sine.wav").unwrap();
-        (doc.channels, doc.sample_rate)
+        (doc.channels.to_vec(), doc.sample_rate)
     }
 
     /// Regression test for the real bug behind "blur gives an error": `blur_blur` is the
@@ -3390,6 +3503,102 @@ mod tests {
     /// a safety net for the non-catalog `IoKind`s rather than something exercised in practice.
     /// Collects every failure before asserting, so one bad entry's
     /// error doesn't hide every other one behind it.
+    /// Runs every single-input catalog process that splits into lanes on a stereo selection
+    /// twice in order and once with its lanes in parallel, and requires the parallel result to
+    /// match. Guards against a CDP program that writes a fixed-name scratch file into its
+    /// working directory, which two lanes running at once would share. A process whose two
+    /// in-order runs already differ (it is random) is only required to succeed in parallel.
+    /// Gated like the smoke test: set TUI_WAVE_CDP_SMOKE=1.
+    #[test]
+    fn parallel_lanes_match_running_in_order() {
+        if std::env::var("TUI_WAVE_CDP_SMOKE").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set TUI_WAVE_CDP_SMOKE=1 to run the lane parity sweep");
+            return;
+        }
+        let cdp_dir = require_cdp!();
+        let (mono, sample_rate) = mono_sine_channels();
+        let right: Vec<f32> = mono[0].iter().enumerate().map(|(i, s)| s * 0.5 + ((i % 97) as f32 - 48.0) * 0.001).collect();
+        let stereo = vec![mono[0].clone(), right];
+        let input = crate::model::cdp::InputSpec {
+            channels: 2,
+            sample_rate,
+            len_samples: stereo[0].len(),
+            head_tail_marks: vec![stereo[0].len() / 8, stereo[0].len() / 4, stereo[0].len() / 2, stereo[0].len() * 3 / 4],
+        };
+        let (catalog, _) = crate::model::cdp::CdpCatalog::load(None);
+        let mut checked = 0;
+        let mut random = Vec::new();
+        let mut failures = Vec::new();
+        for def in &catalog.processes {
+            if def.input_arity().0 != 1 {
+                continue;
+            }
+            let plain = def.params.iter().all(|p| {
+                !p.required_envelope
+                    && !p.required_list
+                    && !p.range_scales_with_input_duration
+                    && !p.default_from_dc_offset
+                    && !matches!(
+                        p.kind,
+                        crate::model::cdp::ParamKind::FormantBufferRef { .. } | crate::model::cdp::ParamKind::FilePath { .. }
+                    )
+            });
+            if !plain {
+                continue;
+            }
+            let values: Vec<_> = def.params.iter().map(|p| p.kind.default_value()).collect();
+            // Lists and envelopes need seeding the smoke test does by hand; leave them to it.
+            if values.iter().any(|v| {
+                matches!(v, crate::model::cdp::ParamValue::List(_) | crate::model::cdp::ParamValue::Breakpoints(_))
+            }) {
+                continue;
+            }
+            let Ok(planned) = crate::model::cdp::plan_job(def, &values, std::slice::from_ref(&input), &crate::model::cdp::PvocSettings::default())
+            else {
+                continue;
+            };
+            if crate::model::cdp::pipeline::independent_lanes(&planned).is_none() {
+                continue;
+            }
+            let job = Job {
+                id: 900,
+                cdp_dir: cdp_dir.clone(),
+                planned,
+                inputs: vec![stereo.clone()],
+                input_sample_rate: sample_rate,
+                purpose: JobPurpose::Apply,
+            };
+            let run = |parallel: bool| {
+                let dir = std::env::temp_dir().join(format!(
+                    "tui-wave-lane-parity-{}-{}-{parallel}-{}",
+                    std::process::id(),
+                    def.key,
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                ));
+                std::fs::create_dir_all(&dir).unwrap();
+                let _guard = TempDirGuard(dir.clone());
+                let (tx, _rx) = unbounded();
+                run_job_body_with(&job, &tx, &AtomicBool::new(false), &dir, parallel).map(|o| o.results)
+            };
+            let Ok(first) = run(false) else { continue };
+            let second = run(false).ok();
+            let parallel = run(true);
+            checked += 1;
+            match parallel {
+                Err(e) => failures.push(format!("{}: fails only in parallel: {e:?}", def.key)),
+                Ok(par) if second.as_ref() == Some(&first) => {
+                    if par != first {
+                        failures.push(format!("{}: parallel output differs from in-order output", def.key));
+                    }
+                }
+                Ok(_) => random.push(def.key.clone()),
+            }
+        }
+        eprintln!("lane parity: {checked} processes checked; nondeterministic (success only): {random:?}");
+        assert!(checked > 0, "no lane-splitting process was exercised");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     #[test]
     fn catalog_smoke_test() {
         if std::env::var("TUI_WAVE_CDP_SMOKE").ok().as_deref() != Some("1") {

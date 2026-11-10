@@ -15984,7 +15984,7 @@ impl App {
                         self.push_generated_document(Document {
                             original_channels: Vec::new(),
                             head_tail_marks: Vec::new(),
-                            channels: cached.channels.clone(),
+                            channels: cached.channels.clone().into(),
                             sample_rate: cached.sample_rate,
                             bits_per_sample,
                             selection: None,
@@ -16161,7 +16161,7 @@ impl App {
                     self.dialog = Some(reopen(focus, "no second input buffer".into(), fields, second_input, variadic_input, preview, presets, preset_selected));
                     return;
                 };
-                praat_inputs.push(doc_b.channels.clone());
+                praat_inputs.push(doc_b.channels.to_vec());
             }
             // The variadic picks, after the selection's own — the same order, and for the same
             // reason, as the CDP branch below: `input_names` is positional, so this *is* the
@@ -16172,7 +16172,7 @@ impl App {
             // bug: a per-backend branch updated on one side only.
             for doc_index in &variadic_docs {
                 let Some(extra) = self.documents.get(*doc_index) else { continue };
-                praat_inputs.push(extra.channels.clone());
+                praat_inputs.push(extra.channels.to_vec());
             }
             let sample_rate = doc.sample_rate;
             if let Some(error) = self.praat_submit(
@@ -16210,14 +16210,14 @@ impl App {
         }
         if let Some(doc_b) = second_doc_index.and_then(|i| self.documents.get(i)) {
             if matches!(def.input, IoKind::DualWav | IoKind::DualAna) {
-                inputs.push(doc_b.channels.clone());
+                inputs.push(doc_b.channels.to_vec());
             }
         }
         // Must stay index-parallel to the `input_specs` loop above (`TempWavSpec.input_index`
         // addresses this `Vec`), so it skips exactly the same unresolvable picks.
         for doc_index in &variadic_docs {
             let Some(extra) = self.documents.get(*doc_index) else { continue };
-            inputs.push(extra.channels.clone());
+            inputs.push(extra.channels.to_vec());
         }
         let input_sample_rate = doc.sample_rate;
         let job_id = self.cdp_next_job_id;
@@ -16534,7 +16534,7 @@ impl App {
                                 self.push_generated_document(Document {
                                     original_channels: Vec::new(),
                                     head_tail_marks: Vec::new(),
-                                    channels: output.result,
+                                    channels: output.result.into(),
                                     sample_rate: output.sample_rate,
                                     bits_per_sample,
                                     selection: None,
@@ -16758,7 +16758,7 @@ impl App {
                             self.push_generated_document(Document {
                                 original_channels: Vec::new(),
                                 head_tail_marks: Vec::new(),
-                                channels: output.result,
+                                channels: output.result.into(),
                                 sample_rate: output.sample_rate,
                                 bits_per_sample,
                                 selection: None,
@@ -17107,7 +17107,7 @@ impl App {
                 self.resume_step_edit_with_error(resume, "Pick a second-input buffer first (Left/Right)".into());
                 return;
             };
-            let picked = self.documents.get(doc_i).map(|d| (d.channels.clone(), d.sample_rate, d.len_samples()));
+            let picked = self.documents.get(doc_i).map(|d| (d.channels.to_vec(), d.sample_rate, d.len_samples()));
             let Some((channels, sample_rate, len)) = picked else {
                 self.resume_step_edit_with_error(resume, "The picked second-input buffer is gone".into());
                 return;
@@ -17220,7 +17220,7 @@ impl App {
                 return;
             };
             let Some(doc) = self.documents.get(doc_i) else { return };
-            (doc.channels.clone(), doc.sample_rate, doc_i, (0, doc.len_samples()))
+            (doc.channels.to_vec(), doc.sample_rate, doc_i, (0, doc.len_samples()))
         };
 
         let cdp_dir = std::path::PathBuf::from(&self.config.cdp_dir);
@@ -18105,7 +18105,7 @@ impl App {
                     self.push_document(Document {
                         original_channels: Vec::new(),
                         head_tail_marks: Vec::new(),
-                        channels: final_frame.running_buffer,
+                        channels: final_frame.running_buffer.into(),
                         sample_rate: final_frame.running_rate,
                         bits_per_sample,
                         selection: None,
@@ -18367,7 +18367,7 @@ impl App {
         let run = self.cdp_pending_chain_run.as_ref()?;
         let doc_index = run.buffer_picks.get(path).copied()?;
         let doc = self.documents.get(doc_index)?;
-        Some((doc.channels.clone(), doc.sample_rate))
+        Some((doc.channels.to_vec(), doc.sample_rate))
     }
 
     /// "Extract Pitch Curve" (CDP-Ext-Plan.md Phase 4 "hard tier") — runs `pvoc anal` +
@@ -18957,7 +18957,7 @@ impl App {
                                 self.push_generated_document(Document {
                                     original_channels: Vec::new(),
                                     head_tail_marks: Vec::new(),
-                                    channels,
+                                    channels: channels.into(),
                                     sample_rate: output.sample_rate,
                                     bits_per_sample,
                                     selection: None,
@@ -18997,7 +18997,7 @@ impl App {
                                     self.push_document(Document {
                                         original_channels: Vec::new(),
                                         head_tail_marks: Vec::new(),
-                                        channels,
+                                        channels: channels.into(),
                                         sample_rate: output.sample_rate,
                                         bits_per_sample,
                                         selection: None,
@@ -20128,7 +20128,7 @@ impl App {
                 // up under the user's own Up/Down and make the list unusable.
                 if let Ok(document) = crate::model::io::load_audio(&path) {
                     self.audition_audio =
-                        audition_engine(document.channels, document.sample_rate);
+                        audition_engine(document.channels.into_inner(), document.sample_rate);
                     self.audition_playing_path = Some(path);
                 }
             }
@@ -20246,7 +20246,7 @@ impl App {
         let new_doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![mixed],
+            channels: vec![mixed].into(),
             sample_rate,
             bits_per_sample,
             selection: None,
@@ -20315,7 +20315,7 @@ impl App {
         let new_doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels,
+            channels: channels.into(),
             sample_rate,
             bits_per_sample,
             selection: None,
@@ -20409,7 +20409,7 @@ impl App {
             (start, end, region_markers)
         }).filter(|(s, e, _)| s < e).collect();
 
-        let channels_snapshot: Vec<Vec<f32>> = doc.channels.clone();
+        let channels_snapshot: Vec<Vec<f32>> = doc.channels.to_vec();
 
         let limit_length_samples = opts
             .limit_length_ms
@@ -20474,7 +20474,7 @@ impl App {
             let region_doc = Document {
                 original_channels: Vec::new(),
                 head_tail_marks: Vec::new(),
-                channels: region_channels,
+                channels: region_channels.into(),
                 sample_rate,
                 bits_per_sample: bits,
                 selection: None,
@@ -20660,7 +20660,7 @@ impl App {
         // Cloned per block from the resident case, rather than borrowing `doc`, because the
         // exporter's closure has to outlive the immutable borrow this function's `self.dialog`
         // write ends. Only the block is copied, not the file.
-        let resident: Vec<Vec<f32>> = if stream.is_some() { Vec::new() } else { doc.channels.clone() };
+        let resident: Vec<Vec<f32>> = if stream.is_some() { Vec::new() } else { doc.channels.to_vec() };
 
         // One pass over the source, all writers open at once — see `export_streaming`. Both
         // storage modes go through it, differing only in this closure, so the streaming path is
@@ -20806,7 +20806,7 @@ impl App {
 
         let document = Document {
             original_channels: Vec::new(),
-            channels: Vec::new(),
+            channels: Vec::new().into(),
             stream: Some(stream),
             sample_rate: info.sample_rate,
             bits_per_sample: info.bits_per_sample,
@@ -22731,7 +22731,7 @@ impl App {
                 let new_doc = Document {
                     original_channels: Vec::new(),
                     head_tail_marks: Vec::new(),
-                    channels: samples,
+                    channels: samples.into(),
                     sample_rate,
                     bits_per_sample,
                     selection: None,
@@ -23036,7 +23036,7 @@ impl App {
                 let new_doc = Document {
                     original_channels: Vec::new(),
                     head_tail_marks: Vec::new(),
-                    channels,
+                    channels: channels.into(),
                     sample_rate,
                     bits_per_sample,
                     selection: None,
@@ -33545,7 +33545,7 @@ mod tests {
             ch.push((i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5);
         }
         ch.extend(std::iter::repeat_n(0.0, tail));
-        Document { channels: vec![ch], sample_rate: 44_100, ..Default::default() }
+        Document { channels: vec![ch].into(), sample_rate: 44_100, ..Default::default() }
     }
 
     fn open_auto_trim(app: &mut App) {
@@ -33717,7 +33717,7 @@ mod tests {
         ch.extend(std::iter::repeat_n(0.0, 22_050));
         ch.extend_from_slice(&tone);
         ch.extend(std::iter::repeat_n(0.0, 22_050));
-        let doc = Document { channels: vec![ch], sample_rate: 44_100, ..Default::default() };
+        let doc = Document { channels: vec![ch].into(), sample_rate: 44_100, ..Default::default() };
         let mut app = new_app(Some(doc), None);
         let before = app.documents[0].len_samples();
 
@@ -33747,7 +33747,7 @@ mod tests {
         ch.extend(std::iter::repeat_n(0.0, 22_050));
         ch.extend_from_slice(&tone);
         ch.extend(std::iter::repeat_n(0.0, 22_050));
-        let doc = Document { channels: vec![ch], sample_rate: 44_100, ..Default::default() };
+        let doc = Document { channels: vec![ch].into(), sample_rate: 44_100, ..Default::default() };
         let mut app = new_app(Some(doc), None);
 
         open_auto_trim(&mut app);
@@ -33951,7 +33951,7 @@ mod tests {
         Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![val; len]],
+            channels: vec![vec![val; len]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -33968,7 +33968,7 @@ mod tests {
         Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![left; len], vec![right; len]],
+            channels: vec![vec![left; len], vec![right; len]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -33987,7 +33987,7 @@ mod tests {
         Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels,
+            channels: channels.into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -34075,7 +34075,7 @@ mod tests {
     #[test]
     fn the_help_window_cannot_edit_the_document() {
         let mut app = new_app(
-            Some(Document { channels: vec![vec![0.5; 1000]], ..Document::default() }),
+            Some(Document { channels: vec![vec![0.5; 1000]].into(), ..Document::default() }),
             None,
         );
         app.handle_action(Action::SelectAll);
@@ -34230,7 +34230,7 @@ mod tests {
         use ratatui::Terminal;
 
         let mut app = new_app(
-            Some(Document { channels: vec![vec![0.2; 4000], vec![0.2; 4000]], ..Document::default() }),
+            Some(Document { channels: vec![vec![0.2; 4000], vec![0.2; 4000]].into(), ..Document::default() }),
             None,
         );
         let dialogs: Vec<Dialog> = vec![
@@ -34892,7 +34892,7 @@ mod tests {
         );
 
         // Now a two-channel document in the same slot.
-        app.documents[0] = Document { channels: vec![vec![0.2f32; 4_000]; 2], ..Document::default() };
+        app.documents[0] = Document { channels: vec![vec![0.2f32; 4_000]; 2].into(), ..Document::default() };
         app.viewport = None;
         app.rebuild_waveform_caches();
         terminal.draw(|frame| app.render(frame)).unwrap();
@@ -35102,7 +35102,7 @@ mod tests {
         Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![channel],
+            channels: vec![channel].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -35216,7 +35216,7 @@ mod tests {
         Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![channel],
+            channels: vec![channel].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -35494,7 +35494,7 @@ mod tests {
         app.start_chain_run(
             chain,
             std::collections::HashMap::new(),
-            app.documents[0].channels.clone(),
+            app.documents[0].channels.to_vec(),
             app.documents[0].sample_rate,
             0,
             (0, 44_100),
@@ -35516,7 +35516,7 @@ mod tests {
             .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5)
             .collect();
         let mut document = doc(0.0, 44_100);
-        document.channels = vec![tone];
+        document.channels = vec![tone].into();
         let mut app = new_app(Some(document), None);
         if !app.praat_ready() {
             eprintln!("skipping: praat unavailable");
@@ -35531,7 +35531,7 @@ mod tests {
         app.start_chain_run(
             chain,
             std::collections::HashMap::new(),
-            app.documents[0].channels.clone(),
+            app.documents[0].channels.to_vec(),
             app.documents[0].sample_rate,
             0,
             (0, 44_100),
@@ -35566,7 +35566,7 @@ mod tests {
             .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5)
             .collect();
         let mut document = doc(0.0, 44_100);
-        document.channels = vec![tone.clone()];
+        document.channels = vec![tone.clone()].into();
         let mut app = new_app(Some(document), None);
         if !app.praat_ready() {
             eprintln!("skipping: praat unavailable");
@@ -35656,7 +35656,7 @@ mod tests {
         let _home = crate::config::TestConfigHome::new("a_chain_ending_at_another_rate_op");
         let mut document = doc(0.0, 48_000);
         document.sample_rate = 48_000;
-        document.channels = vec![(0..48_000).map(|i| (i as f32 * 0.03).sin() * 0.4).collect()];
+        document.channels = vec![(0..48_000).map(|i| (i as f32 * 0.03).sin() * 0.4).collect()].into();
         let mut app = new_app(Some(document), None);
         if !app.praat_ready() {
             eprintln!("skipping: praat unavailable");
@@ -35669,7 +35669,7 @@ mod tests {
         };
         let source = app.documents[0].channels.clone();
         app.start_chain_run(
-            chain, std::collections::HashMap::new(), source, 48_000, 0, (0, 48_000),
+            chain, std::collections::HashMap::new(), source.to_vec(), 48_000, 0, (0, 48_000),
             ChainRunFinish::Splice,
         );
         drain_chain_run(&mut app);
@@ -35691,7 +35691,7 @@ mod tests {
             .map(|i| (i as f32 * 220.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5)
             .collect();
         let mut document = doc(0.0, 44_100);
-        document.channels = vec![tone.clone()];
+        document.channels = vec![tone.clone()].into();
         let mut app = new_app(Some(document), None);
         if !app.praat_ready() {
             eprintln!("skipping: praat unavailable");
@@ -35709,7 +35709,7 @@ mod tests {
             );
             drain_chain_run(app);
             let made = app.documents.last().unwrap();
-            (made.channels.clone(), made.sample_rate)
+            (made.channels.to_vec(), made.sample_rate)
         };
         let tap = |steps: Vec<crate::model::cdp::ChainStep>| Branch { source: BranchSource::Tap, steps };
         let (dry, rate) = render(&mut app, vec![tap(Vec::new())]);
@@ -35775,7 +35775,7 @@ mod tests {
             })
             .collect();
         let mut document = doc(0.0, sr * 8);
-        document.channels = vec![input.clone()];
+        document.channels = vec![input.clone()].into();
         let mut app = new_app(Some(document), None);
         if !app.praat_ready() {
             eprintln!("skipping: praat unavailable");
@@ -40162,7 +40162,7 @@ mod tests {
         let document = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![channel],
+            channels: vec![channel].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -47890,7 +47890,7 @@ mod tests {
         let document = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![samples],
+            channels: vec![samples].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -47940,7 +47940,7 @@ mod tests {
         let document = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![samples],
+            channels: vec![samples].into(),
             sample_rate: 1000,
             selection: None,
             cursor: 0,
@@ -47987,7 +47987,7 @@ mod tests {
         let document = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![samples],
+            channels: vec![samples].into(),
             sample_rate: 1000,
             selection: None,
             cursor: 0,
@@ -48136,7 +48136,7 @@ mod tests {
         let document = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![0.5f32; 100]],
+            channels: vec![vec![0.5f32; 100]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -49796,7 +49796,7 @@ mod tests {
             }
         }
         let len = samples.len();
-        let doc = Document { channels: vec![samples.clone()], sample_rate: 96_000, ..Default::default() };
+        let doc = Document { channels: vec![samples.clone()].into(), sample_rate: 96_000, ..Default::default() };
         let plain_mean = samples.iter().map(|s| *s as f64).sum::<f64>() / len as f64;
         assert!(plain_mean < -0.05, "the premise: this material's mean is far from zero ({plain_mean})");
         assert!(
@@ -49807,7 +49807,7 @@ mod tests {
 
         // And a real offset is still reported exactly.
         let shifted: Vec<f32> = samples.iter().map(|s| s + 0.03).collect();
-        let doc = Document { channels: vec![shifted], sample_rate: 96_000, ..Default::default() };
+        let doc = Document { channels: vec![shifted].into(), sample_rate: 96_000, ..Default::default() };
         assert!(
             (dc_offset_estimate(&doc, 0, len, None) - 0.03).abs() < 0.001,
             "got {}",
@@ -49819,7 +49819,7 @@ mod tests {
     #[test]
     fn dc_offset_can_be_measured_per_channel_or_across_all() {
         let doc = Document {
-            channels: vec![vec![0.02; 1_000], vec![-0.03; 1_000]],
+            channels: vec![vec![0.02; 1_000], vec![-0.03; 1_000]].into(),
             sample_rate: 44_100,
             ..Default::default()
         };
@@ -50086,7 +50086,7 @@ mod tests {
 
         let mut app = new_app(
             Some(Document {
-                channels: vec![vec![0.3f32; 4410]; 2],
+                channels: vec![vec![0.3f32; 4410]; 2].into(),
                 sample_rate,
                 path: Some(PathBuf::from("/tmp/achla-clean.wav")),
                 ..Document::default()
@@ -50628,7 +50628,7 @@ mod tests {
                     // `dsp::DOWNMIX_MIN_CHANNELS` (showing `Info` rather than its dialog), so a
                     // stereo probe would read that correct refusal as "has an ellipsis but
                     // never prompts". Every other entry behaves the same at either width.
-                    channels: vec![vec![0.3f32; 44_100]; 4],
+                    channels: vec![vec![0.3f32; 44_100]; 4].into(),
                     sample_rate: 44_100,
                     path: Some(PathBuf::from("/tmp/probe.wav")),
                     markers: vec![
@@ -51856,7 +51856,7 @@ mod tests {
     fn graphics_app() -> (App, ratatui::Terminal<ratatui::backend::TestBackend>) {
         let mut document = doc(0.1, 44100);
         let ramp: Vec<f32> = (0..44100).map(|i| (i as f32 / 44100.0) - 0.5).collect();
-        document.channels = vec![ramp.clone(), ramp.iter().map(|s| -s).collect()];
+        document.channels = vec![ramp.clone(), ramp.iter().map(|s| -s).collect()].into();
         let mut app = new_app(Some(document), None);
         let mut picker = ratatui_image::picker::Picker::halfblocks();
         picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
@@ -54599,7 +54599,7 @@ mod tests {
         let document = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![samples],
+            channels: vec![samples].into(),
             sample_rate: 44100,
             selection: Some(crate::model::selection::Selection { start: 8, end: 12 }),
             cursor: 8,
@@ -54632,7 +54632,7 @@ mod tests {
         let document = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![samples],
+            channels: vec![samples].into(),
             sample_rate: 44100,
             selection: Some(crate::model::selection::Selection { start: 8, end: 12 }),
             cursor: 8,

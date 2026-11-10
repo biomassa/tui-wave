@@ -22,6 +22,87 @@ pub struct Marker {
     pub label: String,
 }
 
+/// A document's deinterleaved channels, shared copy-on-write.
+///
+/// Reads go through `Deref` to the `Vec<Vec<f32>>`, so code that reads `doc.channels` is
+/// unchanged. Mutable access goes through `Arc::make_mut`: free while nothing else holds the
+/// audio, one full copy when something does. The something is the audio engine: Play hands it
+/// [`Channels::shared`] instead of a copy of the whole document. An edit made while it plays
+/// copies once, which is what every Play used to cost.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Channels(std::sync::Arc<Vec<Vec<f32>>>);
+
+impl Channels {
+    /// Another handle on the same samples, for a reader on another thread.
+    pub fn shared(&self) -> std::sync::Arc<Vec<Vec<f32>>> {
+        self.0.clone()
+    }
+
+    /// The samples as an owned `Vec`, without a copy unless another handle exists.
+    pub fn into_inner(self) -> Vec<Vec<f32>> {
+        std::sync::Arc::try_unwrap(self.0).unwrap_or_else(|shared| (*shared).clone())
+    }
+}
+
+impl std::ops::Deref for Channels {
+    type Target = Vec<Vec<f32>>;
+    fn deref(&self) -> &Vec<Vec<f32>> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Channels {
+    fn deref_mut(&mut self) -> &mut Vec<Vec<f32>> {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+
+impl<'a> IntoIterator for &'a Channels {
+    type Item = &'a Vec<f32>;
+    type IntoIter = std::slice::Iter<'a, Vec<f32>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Channels {
+    type Item = &'a mut Vec<f32>;
+    type IntoIter = std::slice::IterMut<'a, Vec<f32>>;
+    fn into_iter(self) -> Self::IntoIter {
+        std::sync::Arc::make_mut(&mut self.0).iter_mut()
+    }
+}
+
+impl FromIterator<Vec<f32>> for Channels {
+    fn from_iter<I: IntoIterator<Item = Vec<f32>>>(iter: I) -> Self {
+        Channels::from(iter.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl From<Vec<Vec<f32>>> for Channels {
+    fn from(channels: Vec<Vec<f32>>) -> Self {
+        Channels(std::sync::Arc::new(channels))
+    }
+}
+
+impl From<&Channels> for std::sync::Arc<Vec<Vec<f32>>> {
+    fn from(channels: &Channels) -> Self {
+        channels.shared()
+    }
+}
+
+impl PartialEq<Vec<Vec<f32>>> for Channels {
+    fn eq(&self, other: &Vec<Vec<f32>>) -> bool {
+        **self == *other
+    }
+}
+
+impl PartialEq<Channels> for Vec<Vec<f32>> {
+    fn eq(&self, other: &Channels) -> bool {
+        *self == **other
+    }
+}
+
 /// An open audio file. Holds no UI/audio-device state — pure data, fully unit-testable
 /// without a terminal or audio backend.
 pub struct Document {
@@ -30,7 +111,7 @@ pub struct Document {
     /// **Empty when `stream` is set** — see that field. Nothing that reads this needs a
     /// `stream` branch added to it: an empty channel list is the safe reading, so a code path
     /// that was never taught about streaming operates on nothing rather than on wrong data.
-    pub channels: Vec<Vec<f32>>,
+    pub channels: Channels,
     /// Set instead of `channels` for a file too large to hold in RAM, which is then
     /// **read-only** — see `model::stream`.
     ///
@@ -81,7 +162,7 @@ pub struct Document {
 impl Default for Document {
     fn default() -> Self {
         Document {
-            channels: Vec::new(),
+            channels: Vec::new().into(),
             sample_rate: 44100,
             bits_per_sample: 32,
             selection: None,
@@ -548,11 +629,27 @@ impl Document {
 mod tests {
     use super::*;
 
+    /// Play takes a shared handle on the audio; an edit after that must copy, not change what
+    /// the handle sees, and without a second handle an edit must not copy at all.
+    #[test]
+    fn channels_are_copy_on_write() {
+        let mut document = doc(vec![1.0, 2.0, 3.0]);
+        let playing = document.channels.shared();
+        document.remove_range(0..1);
+        assert_eq!(*playing, vec![vec![1.0, 2.0, 3.0]], "the shared handle keeps what it had");
+        assert_eq!(document.channels, vec![vec![2.0, 3.0]]);
+
+        drop(playing);
+        let before = document.channels[0].as_ptr();
+        document.channels[0][0] = 9.0;
+        assert_eq!(document.channels[0].as_ptr(), before, "an unshared edit happens in place");
+    }
+
     fn doc(samples: Vec<f32>) -> Document {
         Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![samples],
+            channels: vec![samples].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -700,11 +797,11 @@ mod tests {
                 .collect()
         };
         let stereo = Document {
-            channels: vec![tone(0.0), tone(3.0)],
+            channels: vec![tone(0.0), tone(3.0)].into(),
             sample_rate: 96_000,
             ..Default::default()
         };
-        let mono = Document { channels: vec![tone(0.0)], sample_rate: 96_000, ..Default::default() };
+        let mono = Document { channels: vec![tone(0.0)].into(), sample_rate: 96_000, ..Default::default() };
 
         for pos in [5_000usize, 5_100, 5_200, 5_300] {
             let snapped = stereo.snap_to_zero_crossing(pos);
@@ -731,7 +828,7 @@ mod tests {
         let samples: Vec<f32> = (0..20_000)
             .map(|i| 0.4 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / sr).sin())
             .collect();
-        let d = Document { channels: vec![samples], sample_rate: 96_000, ..Default::default() };
+        let d = Document { channels: vec![samples].into(), sample_rate: 96_000, ..Default::default() };
         // A 220Hz tone at 96kHz crosses zero every ~218 samples, so a ±480-sample window
         // holds four of them; the snap must pick one within about half a period.
         for pos in [5_000usize, 5_100, 5_200, 5_300] {
@@ -881,7 +978,7 @@ mod tests {
     #[test]
     fn inserting_mono_data_into_a_stereo_document_duplicates_it_into_both_channels() {
         let mut document = Document {
-            channels: vec![vec![1.0, 2.0, 3.0], vec![10.0, 20.0, 30.0]],
+            channels: vec![vec![1.0, 2.0, 3.0], vec![10.0, 20.0, 30.0]].into(),
             sample_rate: 44100,
             ..doc(vec![])
         };

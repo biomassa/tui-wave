@@ -258,7 +258,7 @@ mod tests {
         Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels,
+            channels: channels.into(),
             sample_rate,
             selection: None,
             cursor: 0,

@@ -70,7 +70,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![1.0, 2.0, 3.0]],
+            channels: vec![vec![1.0, 2.0, 3.0]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn redo_after_undo_repeats_the_paste_and_the_command_holds_audio_only_while_undone() {
         let mut doc = Document::default();
-        doc.channels = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        doc.channels = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]].into();
         let original = doc.channels.clone();
         let mut cmd = PasteCommand::new(1, vec![vec![9.0, 9.0]]);
         cmd.execute(&mut doc);

@@ -1042,6 +1042,64 @@ fn process_label(def: &ProcessDef) -> String {
     }
 }
 
+/// Splits a job's steps into chains that share no files and can run at the same time, or
+/// `None` when the job must run in order.
+///
+/// A mono-only process on an N-channel selection is planned as N lanes (`in_cK.wav` ->
+/// `out_cK.wav`, or anal/process/synth per channel), which used to run one after another.
+/// Lanes are found from the files themselves rather than tagged by each planner: step `j`
+/// depends on an earlier step `i` when `j` names a file `i` writes (read after write), when `i`
+/// names the file `j` writes (write after read), or when both write the same file. A file is
+/// "named" when an argument *contains* its name, so a flag with the name glued on still counts;
+/// a false match only joins two lanes, which is safe. Steps joined by any dependency run in
+/// their original order on one thread.
+///
+/// Jobs whose runner reads intermediate results between steps always run in order: deferred
+/// window-count parameters (patched from an earlier `.ana`) and matrix gain calibration
+/// (computed after step 0). So do glob outputs, whose file names are not known in advance.
+pub fn independent_lanes(job: &PlannedJob) -> Option<Vec<Vec<usize>>> {
+    if job.steps.len() < 2
+        || !job.deferred_window_params.is_empty()
+        || job.matrix_gain_calibration.is_some()
+        || job.glob_output.is_some()
+    {
+        return None;
+    }
+    let names = |step: &Invocation, file: &str| step.args.iter().any(|a| a.contains(file));
+    // Union-find over step indices.
+    let mut parent: Vec<usize> = (0..job.steps.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for j in 0..job.steps.len() {
+        for i in 0..j {
+            let (a, b) = (&job.steps[i], &job.steps[j]);
+            let dependent = names(b, &a.expected_output)
+                || names(a, &b.expected_output)
+                || a.expected_output == b.expected_output;
+            if dependent {
+                let (ri, rj) = (root(&mut parent, i), root(&mut parent, j));
+                parent[rj] = ri;
+            }
+        }
+    }
+    let mut lanes: Vec<Vec<usize>> = Vec::new();
+    let mut lane_of_root = std::collections::HashMap::new();
+    for i in 0..job.steps.len() {
+        let r = root(&mut parent, i);
+        let lane = *lane_of_root.entry(r).or_insert_with(|| {
+            lanes.push(Vec::new());
+            lanes.len() - 1
+        });
+        lanes[lane].push(i);
+    }
+    (lanes.len() > 1).then_some(lanes)
+}
+
 /// Plans the full sequence of CDP invocations to apply `def` (with `values` in the same
 /// order as `def.params`) to `inputs` — empty for a synthesis process, one entry for the
 /// selection being processed, two for dual-input processes (the selection plus a second
@@ -2783,6 +2841,63 @@ mod tests {
         assert_eq!(job.input_files[1].source_channels, vec![1]);
         assert_eq!(job.output_files[0].dest_channels, vec![0]);
         assert_eq!(job.output_files[1].dest_channels, vec![1]);
+    }
+
+    fn step(args: &[&str], out: &str) -> Invocation {
+        Invocation {
+            bin: "x".into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            label: out.into(),
+            expected_output: out.into(),
+        }
+    }
+
+    /// Per-channel lanes are found from the files they read and write; anything shared joins
+    /// lanes, and jobs whose runner works between steps never split.
+    #[test]
+    fn independent_lanes_follow_the_files_each_step_touches() {
+        let (catalog, _) = crate::model::cdp::catalog::CdpCatalog::load(None);
+        let def = catalog.processes.iter().find(|p| p.key == "housekeep_extract_4").unwrap();
+        let input = InputSpec { channels: 2, sample_rate: 44_100, len_samples: 44_100, head_tail_marks: vec![] };
+        let on = vec![ParamValue::Number(-0.004), ParamValue::Number(0.003), ParamValue::Toggle(true)];
+        let job = plan_job(def, &on, std::slice::from_ref(&input), &PvocSettings::default()).unwrap();
+        assert_eq!(independent_lanes(&job), Some(vec![vec![0], vec![1]]), "one lane per channel");
+
+        // Spectral lanes: anal -> process -> synth per channel, interleaved in the plan.
+        let mut spectral = job.clone();
+        spectral.steps = vec![
+            step(&["anal", "1", "in_c1.wav", "c1.ana"], "c1.ana"),
+            step(&["anal", "1", "in_c2.wav", "c2.ana"], "c2.ana"),
+            step(&["blur", "c1.ana", "c1b.ana", "3"], "c1b.ana"),
+            step(&["blur", "c2.ana", "c2b.ana", "3"], "c2b.ana"),
+            step(&["synth", "c1b.ana", "out_c1.wav"], "out_c1.wav"),
+            step(&["synth", "c2b.ana", "out_c2.wav"], "out_c2.wav"),
+        ];
+        assert_eq!(independent_lanes(&spectral), Some(vec![vec![0, 2, 4], vec![1, 3, 5]]));
+
+        // A file glued to a flag still counts as named.
+        let mut glued = spectral.clone();
+        glued.steps[3].args.push("-fc1b.ana".into());
+        assert_eq!(independent_lanes(&glued), None, "lane 2 reads lane 1's file, so one lane");
+
+        // Write after read: a later step overwriting a file an earlier one reads.
+        let mut war = job.clone();
+        war.steps[1].expected_output = "in_c1.wav".into();
+        assert_eq!(independent_lanes(&war), None);
+
+        // Two steps writing the same file.
+        let mut waw = job.clone();
+        waw.steps[1].expected_output = waw.steps[0].expected_output.clone();
+        assert_eq!(independent_lanes(&waw), None);
+
+        // The runner patches arguments or rewrites inputs between these steps.
+        let mut deferred = job.clone();
+        deferred.deferred_window_params.push(DeferredWindowParam {
+            ana_relative_name: "c1.ana".into(),
+            step_index: 1,
+            target: DeferredWindowTarget::Arg { arg_index: 0, flag: None, percent: 50.0 },
+        });
+        assert_eq!(independent_lanes(&deferred), None);
     }
 
     /// The toggle is inert on a mono file — there is nothing to separate, and splitting would

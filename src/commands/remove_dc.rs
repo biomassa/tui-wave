@@ -112,7 +112,7 @@ mod tests {
     use super::*;
 
     fn doc_with(channels: Vec<Vec<f32>>) -> Document {
-        Document { channels, sample_rate: 48000, ..Default::default() }
+        Document { channels: channels.into(), sample_rate: 48000, ..Default::default() }
     }
 
     #[test]

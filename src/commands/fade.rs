@@ -228,7 +228,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![1.0; 100]],
+            channels: vec![vec![1.0; 100]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -251,7 +251,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![1.0; 100]],
+            channels: vec![vec![1.0; 100]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -273,7 +273,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![1.0; 50]],
+            channels: vec![vec![1.0; 50]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -296,7 +296,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![1.0; 50]],
+            channels: vec![vec![1.0; 50]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -319,7 +319,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![0.8; 30]],
+            channels: vec![vec![0.8; 30]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -342,7 +342,7 @@ mod tests {
         let mut doc = Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![1.0; 5]],
+            channels: vec![vec![1.0; 5]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,
@@ -363,7 +363,7 @@ mod tests {
         Document {
             original_channels: Vec::new(),
             head_tail_marks: Vec::new(),
-            channels: vec![vec![1.0; len]],
+            channels: vec![vec![1.0; len]].into(),
             sample_rate: 44100,
             selection: None,
             cursor: 0,

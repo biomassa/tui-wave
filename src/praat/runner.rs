@@ -37,14 +37,9 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::cdp::runner::JobPurpose;
-use crate::model::document::Document;
-use crate::model::io::{load_wav, save_wav_with, BitDepth};
+use crate::model::io::{load_wav, BitDepth};
 use crate::model::praat::plan::PraatPlannedJob;
 
-/// How often a spawned Praat is polled for exit, cancellation and timeout. Same cadence as the
-/// CDP runner, for the same reason: frequent enough that Esc feels instant, cheap enough to
-/// ignore.
-const POLL_INTERVAL: Duration = Duration::from_millis(30);
 
 /// Wall-clock limit for one Praat run before it is killed.
 ///
@@ -319,13 +314,9 @@ fn run_job_body(
     let mut input_paths = Vec::with_capacity(job.planned.input_names.len());
     for (index, name) in job.planned.input_names.iter().enumerate() {
         let path = temp_dir.join(name);
-        let channels = job.inputs.get(index).cloned().unwrap_or_default();
-        let doc = Document {
-            channels,
-            sample_rate: job.input_sample_rate,
-            ..Default::default()
-        };
-        save_wav_with(&doc, &path, BitDepth::Float32, false).map_err(|e| PraatError::OutputRead {
+        let planes: Vec<&[f32]> =
+            job.inputs.get(index).map(|c| c.iter().map(Vec::as_slice).collect()).unwrap_or_default();
+        crate::model::io::write_temp_wav(&path, &planes, job.input_sample_rate, BitDepth::Float32).map_err(|e| PraatError::OutputRead {
             path: path.display().to_string(),
             message: e.to_string(),
         })?;
@@ -507,7 +498,7 @@ fn run_job_body(
         .and_then(|path| std::fs::read(path).ok())
         .and_then(|bytes| crate::praat::picture::decode_for_display(&bytes));
 
-    Ok(PraatJobOutput { sample_rate: out.sample_rate, result: out.channels, picture })
+    Ok(PraatJobOutput { sample_rate: out.sample_rate, result: out.channels.into_inner(), picture })
 }
 
 fn run_praat(
@@ -584,6 +575,9 @@ fn run_praat(
 
     let started = Instant::now();
     let mut deadline = job.timeout;
+    // Polled for exit, cancellation and timeout with the CDP runner's backoff: frequent enough
+    // that Esc feels instant, cheap enough to ignore.
+    let mut poll = crate::cdp::runner::PollBackoff::default();
     let status = loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
@@ -604,7 +598,7 @@ fn run_praat(
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) => thread::sleep(POLL_INTERVAL),
+            Ok(None) => poll.sleep(),
             Err(e) => {
                 return Err(PraatError::Spawn {
                     bin: job.praat_bin.display().to_string(),
@@ -866,6 +860,8 @@ pub fn validate_audiotools_dir(dir: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::document::Document;
+    use crate::model::io::save_wav_with;
     use crate::model::praat::plan::{input_wav_name, DRIVER_SCRIPT, OUTPUT_WAV};
 
     /// Skips a test that needs a real Praat rather than failing it, mirroring
@@ -1526,7 +1522,7 @@ mod tests {
                     .iter()
                     .enumerate()
                     .map(|(n, s)| s * (1.0 + n as f32 * 0.0001 * (i + 1) as f32).sin())
-                    .collect()],
+                    .collect()].into(),
                 sample_rate,
                 ..Default::default()
             };
@@ -2079,7 +2075,7 @@ mod tests {
             std::fs::create_dir_all(&dir).expect("corpus dir");
             for i in 0..3 {
                 let (channels, sample_rate) = melody_fixture(base * 3 + i);
-                let doc = Document { channels, sample_rate, ..Default::default() };
+                let doc = Document { channels: channels.into(), sample_rate, ..Default::default() };
                 save_wav_with(&doc, &dir.join(format!("m{i}.wav")), BitDepth::Int16, false)
                     .expect("corpus clip");
             }
