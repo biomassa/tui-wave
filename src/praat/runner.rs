@@ -390,9 +390,10 @@ fn run_job_body(
         // shown under `--run` at all, they segfault Praat outright. See `model::praat::rewrite`
         // for the substitution rules.
         if let Some(rewrite) = &job.planned.pause_rewrite {
-            source = crate::model::praat::rewrite::rewrite_pause_blocks(
+            source = crate::model::praat::rewrite::rewrite_pause_blocks_keeping(
                 &source,
                 &rewrite.blocks,
+                &rewrite.kept,
                 &rewrite.form_locks,
                 rewrite.button_override,
             )

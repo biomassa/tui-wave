@@ -568,7 +568,9 @@ python_command$ = \"py\"
         // 51 -> 52 on 2026-11-10: the 749cbd0 bump brought `Gestural_Lineage_Composer`, with
         // `stumpy` admitted to the analysis tier and its TextGrid-only unit dropped.
         // Plus Generative_Exploration_Map, the first flagged entry outside `py/`.
-        assert_eq!(flagged, 53, "the py group plus PYTHON_ELSEWHERE is 53 processes");
+        // 53 -> 54 on 2026-11-17: the 8e43c32 bump brought `Distributed_Sound_Ecology`
+        // (numpy/scipy/soundfile only). Upstream deleted `Live_1`, which was never planned.
+        assert_eq!(flagged, 54, "the py group plus PYTHON_ELSEWHERE is 54 processes");
     }
 
     /// End to end through the planner: a py-group process must come out asking for a rewritten

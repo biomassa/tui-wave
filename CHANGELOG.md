@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+- **Airwindows updated to the latest upstream**, which adds
+  **PunchyDeluxe2** (Amp Sims), a more usable PunchyDeluxe.
+  PointyDeluxe2 is not included yet: upstream shipped it without
+  its description.
+- **praatAudioTools updated to `8e43c32`.**
+  - **New:** Distributed Sound Ecology (py). Its "Custom matrix"
+    network preset and "All three (comparison)" architecture are
+    left out: the first needs a typed matrix, the second returns
+    three sounds.
+  - **Back in the browser:** Babbitt's Combinatorial Arrays and
+    Ligeti Micropolyphonic Choir Machine, which upstream gave new
+    settings pages.
+    - Babbitt's Details settings are now two pages, both in the
+      dialog. If Duration mode is Target and the target needs a
+      tempo outside 20-300 bpm, the run stops and says which
+      durations fit.
+    - Ligeti has a new Microtemporal mode. Its settings apply when
+      Microtemporal settings is ticked. The new presets 7-14 show
+      their values in the dialog.
+  - **Rewritten upstream, with new settings:** Onset-Based
+    Oscillator Bank, Undertone Field, Creative Convolution,
+    Rhythmatist and RF Concatenative. Saved presets for these five
+    no longer line up.
+  - Spectrum Envelope Lab, Spectral Gesture Forge and Performance
+    Launcher have upstream fixes; their settings are unchanged.
+- Math Operations and Undertone Field now show every value their
+  presets set. Before, picking a preset left some menus showing
+  values the run did not use.
+
 ## 2026-11-10 (2.20.0)
 
 - **Less waiting and less memory on large and multichannel files.**

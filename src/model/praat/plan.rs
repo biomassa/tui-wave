@@ -124,6 +124,9 @@ pub struct PauseRewrite {
     /// Assignments replacing each pause block, keyed by the block's index in the original
     /// script. A block with no entry is deleted outright — see `rewrite_pause_blocks`.
     pub blocks: BTreeMap<usize, Vec<Assignment>>,
+    /// Pages left out of the dialog but kept for the run, as the Praat lines standing in for
+    /// each. See [`crate::model::cdp::def::PraatPauseKeep`].
+    pub kept: BTreeMap<usize, Vec<String>>,
     /// `boolean` form fields to delete from the script and assign instead, as (label, value).
     /// For a switch that exists only to gate a hoisted block: once its parameters are in this
     /// app's dialog the switch controls nothing, so it is removed rather than shown as a
@@ -410,13 +413,20 @@ pub fn plan_praat_job_with(
             crate::model::praat::rewrite::repair_branch_scoped_variables(&source) != source
         })
         .unwrap_or(false);
+    let kept: BTreeMap<usize, Vec<String>> = def
+        .praat_pause_keep
+        .iter()
+        .map(|keep| (keep.block, keep.lines.clone()))
+        .collect();
     let pause_rewrite = (!blocks.is_empty()
+        || !kept.is_empty()
         || !form_locks.is_empty()
         || !directories.is_empty()
         || needs_branch_repair)
         .then(|| PauseRewrite {
             script_name: REWRITTEN_SCRIPT.to_string(),
             blocks,
+            kept,
             form_locks,
             directories,
             button_override: def.praat_pause_button,
@@ -641,7 +651,7 @@ mod tests {
             interactive: false,
             praat_form_locks: Vec::new(),
             praat_builtin: false,
-            praat_python_rewrite: false, praat_argument_fixes: Vec::new(), praat_pause_button: None,
+            praat_python_rewrite: false, praat_argument_fixes: Vec::new(), praat_pause_button: None, praat_pause_keep: Vec::new(),
             requires_simple_wav_input: false,
             sidecar_extension: None,
             min_inputs: None,

@@ -321,6 +321,15 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
         },
         "why": "All Outputs leaves several Sounds and the driver keeps only one",
     },
+    # New 2026-11-17. "Custom matrix" needs a free-text matrix the dialog cannot hold, and
+    # "All three (comparison)" leaves three Sounds where the driver keeps one.
+    "py/Distributed_Sound_Ecology.praat": {
+        "drop_options": {
+            "Network_preset": ["Custom matrix (edit network options)"],
+            "Architecture": ["All three (comparison)"],
+        },
+        "why": "Custom matrix needs free text; All three leaves three Sounds",
+    },
     "Filter & Color/XMod.praat": {
         "drop_options": {
             "Mod_source": ["Second Sound (select 2 sounds)"],
@@ -573,6 +582,20 @@ PAUSE_HOISTS: dict[str, dict] = {
         "new_buffer": True,
         "why": "Custom preset page (density, grain size, locality, speed, envelope, seed)",
     },
+    # New 2026-11-17. One page, behind `if procMode = 2 and microtemporal_settings = 1`. No
+    # `lock_on`, like Pitch_Processor: presets 7-14 set these values themselves, and a locked
+    # page would override them with the dialog's. Unticked, the script's own values apply.
+    "Reverb/Ligeti_Micropolyphonic_Choir_Machine.praat": {
+        "why": "Microtemporal settings page (micro offset, evolution, scatter, grain, timeline)",
+    },
+    # New 2026-11-17. Three optional pages, each behind its own toggle; the network page also
+    # opens for the Custom matrix preset, which GUI_BLOCKING_OVERRIDES removes with its
+    # free-text matrix row.
+    "py/Distributed_Sound_Ecology.praat": {
+        "lock_on": ["Edit_network_options", "Edit_feedback_details", "Edit_output_options"],
+        "omit_rows": {0: ["Custom_matrix"]},
+        "why": "network, feedback and output pages",
+    },
     "Pitch/Undertone_Field.praat": {
         "lock_on": ["Show_advanced_settings"],
         "why": "advanced settings page (denominator list and its controls)",
@@ -614,6 +637,13 @@ PAUSE_HOISTS: dict[str, dict] = {
     # the default, so no `PAUSE_BUTTON_OVERRIDES` entry is needed.
     "Generative & Synthesis/Babbitt_s_Combinatorial_Arrays.praat": {
         "lock_on": ["Edit_details"],
+        # 2026-11-17: the Details page became two pages, and a third arrived inside
+        # `procedure durationFromTarget`: a recovery prompt for a target duration that needs a
+        # tempo outside 20-300 bpm, seeded from the values that just failed. Not a setting, so
+        # it is not hoisted; `keep_blocks` makes it act as its default button ("Apply" with no
+        # edit), which reaches the script's own "not reachable ... choose a duration from" exit.
+        "blocks": [0, 1],
+        "keep_blocks": [2],
         "why": "Details page (hexachord source, array operation, rhythm, register, seed, MusicXML)",
     },
     # New in the 2026-09-21 bump: four scripts with one `if <toggle>` guarding one `beginPause`
@@ -1301,6 +1331,83 @@ def without_ignored_paths(source: str) -> str:
 DIRECTORY_CHOOSER_RE = re.compile(r"^[ \t]*(\w+\$)[ \t]*=[ \t]*chooseDirectory\$", re.M)
 
 
+# A field line of a pause page, `real: "Target duration (s)", fixed$(target_duration_s, 3)`.
+PAUSE_FIELD_LINE_RE = re.compile(
+    r'^\s*(?P<kind>\w+):\s*"(?P<label>[^"]*)"\s*(?:,\s*(?P<seed>.*?))?\s*$'
+)
+NUMERIC_PAUSE_KINDS = {"real", "positive", "integer", "natural"}
+CHOICE_PAUSE_KINDS = {"boolean", "optionmenu", "optionMenu", "choice"}
+TEXT_PAUSE_KINDS = {"word", "sentence", "text"}
+# Lines of a page body that set no variable.
+INERT_PAUSE_KINDS = {"comment", "option"}
+
+
+def keep_block_lines(body: str) -> list[str] | str:
+    """The assignments that pressing a pause page's default button makes, as Praat lines.
+
+    For a page the dialog leaves out but the run can still reach -- Babbitt's "target duration
+    not reachable" prompt, inside a procedure, seeded from the values that just failed. Deleting
+    such a page leaves its variables unassigned, and the script then stops on an unknown
+    variable instead of with the message it wrote for the case. Assigning each field its own seed
+    is what Praat does when the page's default button is pressed without an edit, so the script
+    takes the path its author wrote for "nothing changed".
+
+    A numeric field seeded with text (`string$(x)`) gets `number(...)`, as Praat converts the
+    field's text. Anything this does not recognise is an error, never a guess.
+    """
+    lines = []
+    for raw in body.split("\n"):
+        text = raw.strip()
+        if not text or text.startswith("#"):
+            continue
+        # A comment's text may be any expression, so it is skipped before it is parsed.
+        if text.split(":", 1)[0].strip() in INERT_PAUSE_KINDS:
+            continue
+        m = PAUSE_FIELD_LINE_RE.match(text)
+        if not m:
+            return f"cannot read pause line {text!r}"
+        kind, label, seed = m.group("kind"), m.group("label"), m.group("seed")
+        if kind in INERT_PAUSE_KINDS:
+            continue
+        if seed is None:
+            return f"pause field {label!r} has no seed"
+        variable = praat_variable(label.replace(" ", "_"))
+        if kind in NUMERIC_PAUSE_KINDS:
+            is_text = seed.startswith('"') or re.search(r"\$\s*\(", seed) or seed.endswith("$")
+            lines.append(f"{variable} = number({seed})" if is_text else f"{variable} = {seed}")
+        elif kind in CHOICE_PAUSE_KINDS:
+            lines.append(f"{variable} = {seed}")
+        elif kind in TEXT_PAUSE_KINDS:
+            lines.append(f"{variable}$ = {seed}")
+        else:
+            return f"unsupported pause field kind {kind!r}"
+    return lines
+
+
+def keep_blocks_for(source: str, hoist: dict) -> list | str:
+    """`(index, lines)` for each page in the hoist's `keep_blocks`, or a problem string."""
+    wanted = hoist.get("keep_blocks", [])
+    if not wanted:
+        return []
+    blocks = find_pause_blocks(source)
+    hoisted = hoist.get("blocks")
+    out = []
+    for index in wanted:
+        if index >= len(blocks):
+            return f"keep_blocks names page {index}, the script has {len(blocks)}"
+        if hoisted is None or index in hoisted:
+            return f"keep_blocks page {index} is also hoisted; list the hoisted pages in `blocks`"
+        start, end = blocks[index]["span"]
+        m = PAUSE_RE.match(source, start)
+        if not m:
+            return f"keep_blocks page {index} is not a beginPause page"
+        lines = keep_block_lines(m.group("body"))
+        if isinstance(lines, str):
+            return f"keep_blocks page {index}: {lines}"
+        out.append((index, lines))
+    return out
+
+
 def build_directory_params(source: str, hoist: dict) -> list | str:
     """The `folder_path` params a directory-hoisted script gains, or a problem string.
 
@@ -1815,27 +1922,34 @@ def reachable_preset_targets(
             if rhs in selector:
                 selector.add(lhs)
 
-    names = "|".join(re.escape(n) for n in sorted(selector))
-    head = re.compile(rf"^\s*(?:els?)?if\s+(?:{names})\s*=\s*(\d+)\s*$")
+    # A head may name one option (`preset = 3`) or a range (`preset >= 7 and preset <= 10`,
+    # Ligeti Choir); a range's lines count for every option in it. A whole-menu condition
+    # (`preset > 0`) is not a head.
+    count = len(params[preset_index].options)
+    head = re.compile(r"^\s*(?:els?)?if\s+(.+?)\s*$")
     found: dict[int, set[int]] = {}
-    option: int | None = None
+    options: set[int] | None = None
     for line in source.split("\n"):
         match = head.match(line)
         if match:
-            option = int(match.group(1))
-            found.setdefault(option, set())
-            continue
-        if option is None:
+            named = selector_condition_options(match.group(1), selector, count)
+            if named and len(named) < count:
+                options = named
+                for option in options:
+                    found.setdefault(option, set())
+                continue
+        if options is None:
             continue
         stripped = line.strip()
         if stripped.startswith(("else", "endif")) and not stripped.startswith(("elsif", "elif")):
-            option = None
+            options = None
             continue
         assignment = ASSIGNMENT_RE.match(line)
         if assignment:
             target = by_variable.get(assignment.group(1))
             if target is not None and target != preset_index:
-                found[option].add(target)
+                for option in options:
+                    found[option].add(target)
     return {opt: targets for opt, targets in found.items() if targets}
 
 
@@ -2063,6 +2177,29 @@ def fill_default_preset_rows(proc: "Process") -> None:
             row.default = int(value) - 1
 
 
+SELECTOR_TERM_RE = re.compile(r"^(?P<name>[A-Za-z_]\w*)\s*(?P<op><>|<=|>=|=|<|>)\s*(?P<value>\d+)$")
+
+
+def selector_condition_options(condition: str, names: set[str], count: int) -> set[int] | None:
+    """The 1-based options of a `count`-option menu for which `condition` holds, or None.
+
+    Understood: comparisons of a selector name against a literal, joined by `and`
+    (`preset = 3`, `preset > 1`, `preset >= 7 and preset <= 10`). Anything else -- another
+    variable, `or`, an expression -- is None, so the branch is skipped rather than half-read.
+    """
+    options = set(range(1, count + 1))
+    for term in re.split(r"\s+and\s+", condition.strip()):
+        m = SELECTOR_TERM_RE.match(term.strip())
+        if not m or m.group("name") not in names:
+            return None
+        value, op = int(m.group("value")), m.group("op")
+        test = {"=": lambda o: o == value, "<>": lambda o: o != value,
+                "<": lambda o: o < value, "<=": lambda o: o <= value,
+                ">": lambda o: o > value, ">=": lambda o: o >= value}[op]
+        options = {o for o in options if test(o)}
+    return options
+
+
 def extract_script_presets(source: str, params: list[Param]):
     """Return `(preset_index, custom_option, {option_index: {param_index: value}})`, or None.
 
@@ -2099,73 +2236,87 @@ def extract_script_presets(source: str, params: list[Param]):
             if rhs in selector_names:
                 selector_names.add(lhs)
 
-    # Only a whole condition comparing the selector against a literal, so a compound one
+    # Only conditions on the selector alone (`selector_condition_options`), so a compound one
     # (`if preset = 2 and stereo`) is skipped rather than half-understood. Praat accepts `elif`
     # as well as `elsif` (verified against 7.0.02); `Giant_FFT_Recomposer` writes `elif`
     # throughout, and matching only `elsif` read its whole chain as one branch.
-    selector = "|".join(re.escape(n) for n in sorted(selector_names))
-    option_re = re.compile(rf"^(?:{selector})\s*=\s*(\d+)$")
-    guard_re = re.compile(rf"^(?:{selector})\s*(?:=|<>|<=|>=|<|>)\s*\S+$")
     open_re = re.compile(r"^if\s+(.+)$")
     else_re = re.compile(r"^(?:elsif|elif)\s+(.+)$")
 
     blocks: dict[int, dict[int, float]] = {}
-    # One entry per open `if`, holding whether that block's *current* condition tests the
-    # selector. A chain is frequently wrapped in `if preset > 1` -- four scripts do it -- and the
-    # branches inside are then indented. Reading them is safe exactly when every enclosing
-    # condition is about the same menu, since `preset = 3` implies `preset > 1`.
+    count = len(params[preset_index].options)
+    # One frame per open `if`. `arm` is the set of options the branch being read applies to, or
+    # None when its condition is not about the menu (or not understood). `claimed` collects the
+    # options earlier arms of the same chain took, so an `else` nested inside a range arm gets
+    # what is left of the range. A chain is frequently wrapped in `if preset > 1` -- four scripts
+    # do it -- and the branches inside are then indented. Reading them is safe exactly when every
+    # enclosing condition is about the same menu, since `preset = 3` implies `preset > 1`.
     # `Advanced_Stereo_Panner` is why the check is not simply "is it indented": its chain sits
     # under `if pan_mode = 1`, so its values hold in one mode only and are not the menu's answer.
-    guards: list[bool] = []
-    current: int | None = None
-    depth: int | None = None
+    #
+    # A range arm (`elsif preset >= 7 and preset <= 10`, Ligeti Choir, 2026-11-17) sets what it
+    # sets for every option in the range, and a per-option `if` inside it narrows that.
+    frames: list[dict] = []
 
-    def start(option: int | None, level: int) -> None:
-        nonlocal current, depth
-        current, depth = option, level
-        if option is not None:
-            blocks.setdefault(option, {})
+    def enclosing() -> set[int] | None:
+        """The options the enclosing branch applies to; every option at the top level."""
+        if not frames:
+            return set(range(1, count + 1))
+        return frames[-1]["arm"]
+
+    def narrowed(condition: str, parent: set[int] | None) -> set[int] | None:
+        if parent is None:
+            return None
+        options = selector_condition_options(condition, selector_names, count)
+        return None if options is None else options & parent
 
     for line in source.split("\n"):
         stripped = line.strip()
-        if stripped.startswith("endif"):
-            if guards:
-                guards.pop()
-            if depth is not None and len(guards) < depth:
-                start(None, 0)
+        if re.match(r"^endif\b", stripped):
+            if frames:
+                frames.pop()
             continue
         chained = else_re.match(stripped)
-        if chained or stripped.startswith("else"):
-            condition = chained.group(1) if chained else ""
-            if guards:
-                guards[-1] = bool(guard_re.match(condition))
-            option = option_re.match(condition) if chained else None
-            # Same block as the branch being read, so this ends it and may open the next.
-            if depth is not None and len(guards) == depth:
-                start(int(option.group(1)) if option else None, depth)
-            elif option and all(guards[:-1]):
-                start(int(option.group(1)), len(guards))
+        if chained or re.match(r"^else\b", stripped):
+            if not frames:
+                continue
+            frame = frames[-1]
+            if frame["arm"] is not None:
+                frame["claimed"] |= frame["arm"]
+            if chained:
+                frame["arm"] = narrowed(chained.group(1), frame["parent"])
+                if frame["arm"] is not None:
+                    frame["arm"] -= frame["claimed"]
+            elif frame["parent"] is not None and frames[:-1] and frame["selector_chain"]:
+                # A bare `else` only inside a range arm: at the top level it is the Custom
+                # option or "anything else", which the menu's own table does not describe.
+                frame["arm"] = frame["parent"] - frame["claimed"]
+            else:
+                frame["arm"] = None
+            if frame["arm"] is None:
+                frame["selector_chain"] = False
             continue
         opened = open_re.match(stripped)
         if opened:
-            condition = opened.group(1)
-            guards.append(bool(guard_re.match(condition)))
-            option = option_re.match(condition)
-            if option and all(guards[:-1]):
-                start(int(option.group(1)), len(guards))
+            parent = enclosing()
+            arm = narrowed(opened.group(1), parent)
+            frames.append({"parent": parent, "arm": arm, "claimed": set(),
+                           "selector_chain": arm is not None})
             continue
-        if current is None:
+        # Only a branch's own body, and only under conditions that are all about the menu. An
+        # assignment inside any other `if` runs conditionally, so it is not what the menu sets.
+        if not frames or frames[-1]["arm"] is None:
             continue
-        # Only the branch's own body. An assignment inside a deeper `if` runs conditionally, so
-        # it is not what the menu sets.
-        if len(guards) != depth:
+        # A top-level range that covers the whole menu (`if preset > 0`) says nothing per option.
+        if len(frames[-1]["arm"]) == count:
             continue
         assignment = ASSIGNMENT_RE.match(line)
         if assignment and assignment.group(1) in by_variable:
             target = by_variable[assignment.group(1)]
             # A preset that reassigns the preset menu itself would fight the Custom switch.
             if target != preset_index:
-                blocks[current][target] = float(assignment.group(2))
+                for option in frames[-1]["arm"]:
+                    blocks.setdefault(option, {})[target] = float(assignment.group(2))
 
     blocks = {option: values for option, values in blocks.items() if values}
     options = params[preset_index].options
@@ -2411,6 +2562,9 @@ class Process:
     # Vector Chain only: `runScript:` calls that pass one argument too few, with the value to put
     # back. Each is (call token, arguments passed, insert index, value). See CHAIN_ARGUMENT_FIXES.
     argument_fixes: list = field(default_factory=list)
+    # Pause pages left out of the dialog that the run can still reach, each as
+    # (block index, Praat lines). See `keep_block_lines` and PAUSE_HOISTS' `keep_blocks`.
+    pause_keep: list = field(default_factory=list)
 
 
 def unquote(text: str, colon_form: bool) -> str:
@@ -3285,11 +3439,6 @@ NEVER_PLANNED: dict[str, str] = {
     # entry and was pulled the same day; `cv2` went with it, being imported by nothing else.
     "py/MotionControl.praat":
         "captures ten seconds of webcam hand motion as its control input",
-    # The other live-capture one, and the same reason in a different sense: it opens the
-    # microphone and records for a fixed number of seconds *before* processing. Its input is not
-    # the buffer you have open, so there is nothing for a process to apply to.
-    "py/Live_1.praat":
-        "records from the microphone as its input; the open selection is never read",
     # These four write files somewhere other than the editor, or need something the editor has
     # no way to hold. That is not the same as `out_of_scope`'s "does not fit the app as it
     # stands": a process whose product is a folder on disk has no result to splice back into a
@@ -4003,6 +4152,12 @@ def collect() -> tuple[list[Process], list[tuple[str, str, str]]]:
             if isinstance(built, str):
                 excluded.append((str(rel), "gui_blocking", f"pause hoist failed: {built}"))
                 continue
+            kept = keep_blocks_for(source, hoist)
+            if isinstance(kept, str):
+                excluded.append((str(rel), "gui_blocking", f"pause hoist failed: {kept}"))
+                continue
+            for proc in built:
+                proc.pause_keep = kept
             processes.extend(built)
         else:
             described = extract_description(source)
@@ -4239,6 +4394,12 @@ def render_catalog(processes: list[Process], sha: str) -> str:
         button = PAUSE_BUTTON_OVERRIDES.get(proc.bin)
         if button is not None:
             out.append(f"praat_pause_button = {button}")
+        if proc.pause_keep:
+            kept = ", ".join(
+                f"{{ block = {index}, lines = [{', '.join(toml_string(l) for l in lines)}] }}"
+                for index, lines in proc.pause_keep
+            )
+            out.append(f"praat_pause_keep = [{kept}]")
         if input_kind == "variadic_wav":
             floor = VARIADIC_INPUTS.get(proc.bin, {}).get("min", 1)
             if floor > 1:
@@ -4507,6 +4668,46 @@ def selftest() -> int:
         check(f"endPause target -- {label}: one block found", len(blocks), 1)
         if blocks:
             check(f"endPause target -- {label}: default button", blocks[0]["default_button"], 2)
+
+    # --- preset range arms (Ligeti Choir, 2026-11-17) --------------------------------
+    # `elsif preset >= 7 and preset <= 10` sets values for four options at once, and a per-option
+    # `if` inside narrows them; an `else` inside the range takes what the range has left. Read
+    # only as `preset = N` heads, the range went to the option above it.
+    params = [
+        Param(name="Preset", kind="choice", default=1, options=[f"P{i}" for i in range(1, 6)]),
+        Param(name="Depth", kind="number", default=0.0),
+        Param(name="Rate", kind="number", default=0.0),
+    ]
+    source = (
+        "form Test\n    optionmenu Preset 1\n    real Depth 0\n    real Rate 0\nendform\n"
+        "if preset = 2\n    depth = 1\nelsif preset >= 3 and preset <= 5\n    depth = 2\n"
+        "    if preset = 3\n        rate = 3\n    elsif preset = 4\n        rate = 4\n"
+        "    else\n        rate = 5\n    endif\nendif\n"
+    )
+    extracted = extract_script_presets(source, params)
+    check("preset range arms", extracted and extracted[2],
+          {2: {1: 1.0}, 3: {1: 2.0, 2: 3.0}, 4: {1: 2.0, 2: 4.0}, 5: {1: 2.0, 2: 5.0}})
+    check("preset range -- open-ended", selector_condition_options("preset >= 4", {"preset"}, 5),
+          {4, 5})
+    check("preset range -- another variable is not the menu",
+          selector_condition_options("preset = 2 and stereo = 1", {"preset"}, 5), None)
+
+    # --- kept pause pages (Babbitt, 2026-11-17) --------------------------------------
+    check(
+        "kept page -- default-button assignments",
+        keep_block_lines(
+            '    comment: "Target " + fixed$(t, 2) + " s"\n'
+            '    real: "Target duration (s)", fixed$(target_duration_s, 3)\n'
+            '    integer: "Derivation cycles (0-7)", string$(.oldD)\n'
+            '    boolean: "Keep", keep\n'
+            '    optionmenu: "Mode", mode\n'
+            '        option: "A"\n'
+            '    sentence: "Name", name$\n'
+        ),
+        ["target_duration = number(fixed$(target_duration_s, 3))",
+         "derivation_cycles = number(string$(.oldD))", "keep = keep", "mode = mode",
+         "name$ = name$"],
+    )
 
     # --- string$() defaults ----------------------------------------------------------
     # A numeric pause field wants its default as text, so the idiom is

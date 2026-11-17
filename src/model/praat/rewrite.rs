@@ -637,9 +637,24 @@ fn numeric_assignment(line: &str) -> Option<(String, String)> {
 /// `button_override` reports that `endPause` button as pressed in place of every block's own
 /// declared default; `None` honours each declaration. See `PauseRewrite::button_override` for when
 /// overriding is the right thing and why it is per script rather than a rule.
+/// The runner uses `rewrite_pause_blocks_keeping`; this is the tests' shorthand with no kept pages.
+#[cfg(test)]
 pub fn rewrite_pause_blocks(
     source: &str,
     blocks: &BTreeMap<usize, Vec<Assignment>>,
+    form_locks: &[(String, f64)],
+    button_override: Option<u32>,
+) -> Result<String, RewriteError> {
+    rewrite_pause_blocks_keeping(source, blocks, &BTreeMap::new(), form_locks, button_override)
+}
+
+/// [`rewrite_pause_blocks`], with `kept` naming pages that are not in the dialog but can still
+/// be reached: each is replaced by its lines (the assignments its default button would make)
+/// instead of being deleted. A page in both maps is a catalog error, so `blocks` wins.
+pub fn rewrite_pause_blocks_keeping(
+    source: &str,
+    blocks: &BTreeMap<usize, Vec<Assignment>>,
+    kept: &BTreeMap<usize, Vec<String>>,
     form_locks: &[(String, f64)],
     button_override: Option<u32>,
 ) -> Result<String, RewriteError> {
@@ -702,6 +717,11 @@ pub fn rewrite_pause_blocks(
                     out.push(format!("{indent}{rendered}"));
                 }
             }
+            if !blocks.contains_key(&block_index) {
+                for kept_line in kept.get(&block_index).map(Vec::as_slice).unwrap_or(&[]) {
+                    out.push(format!("{indent}{kept_line}"));
+                }
+            }
             // `endPause` returns the pressed button, and a script may branch on it — only
             // assign when the script actually captured it, so a bare `endPause:` introduces no
             // stray variable.
@@ -720,7 +740,7 @@ pub fn rewrite_pause_blocks(
 
     // Every block the catalog refers to must actually exist, or the entry was generated
     // against a script this no longer is.
-    if let Some(&highest) = blocks.keys().next_back() {
+    if let Some(highest) = blocks.keys().chain(kept.keys()).max().copied() {
         if highest >= block_index {
             return Err(RewriteError::MissingBlock { index: highest, found: block_index });
         }
@@ -1634,6 +1654,30 @@ mod form_lock_tests {
     /// form — rather than hiding its row in the dialog — is what keeps the two sides consistent:
     /// Praat fills a form by position, so a field the catalog no longer declares must not stay
     /// in the script waiting for an argument.
+    /// A kept page is replaced by its default-button assignments, not deleted, and still
+    /// reports its declared button. Babbitt's "target duration not reachable" prompt: deleted,
+    /// `target_duration` was never assigned and Praat stopped on an unknown variable.
+    #[test]
+    fn a_kept_page_assigns_its_defaults_and_its_button() {
+        let source = "form Test\n    real Amount 1.0\nendform\n\
+                      beginPause: \"Retry\"\n    real: \"Target duration (s)\", fixed$(t, 3)\n\
+                      .clicked = endPause: \"Cancel\", \"Apply\", 2, 1\nx = target_duration\n";
+        let kept = BTreeMap::from([(0, vec!["target_duration = number(fixed$(t, 3))".to_string()])]);
+        let out = rewrite_pause_blocks_keeping(source, &BTreeMap::new(), &kept, &[], None)
+            .expect("rewrites");
+
+        assert!(!out.contains("beginPause"), "the page must be gone:\n{out}");
+        assert!(out.contains("target_duration = number(fixed$(t, 3))\n.clicked = 2\n"),
+                "the defaults and the declared button must stand in for it:\n{out}");
+
+        let missing = BTreeMap::from([(1, vec!["y = 1".to_string()])]);
+        assert!(
+            matches!(rewrite_pause_blocks_keeping(source, &BTreeMap::new(), &missing, &[], None),
+                     Err(RewriteError::MissingBlock { index: 1, .. })),
+            "a kept page the script does not have is an error"
+        );
+    }
+
     #[test]
     fn a_locked_form_field_is_deleted_and_assigned() {
         let source = "form Test\n    real Amount 1.0\n    boolean Show_advanced_settings 0\nendform\n\
