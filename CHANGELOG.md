@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-11-17 (2.20.1)
 
 - **Airwindows updated to the latest upstream**, which adds
   **PunchyDeluxe2** (Amp Sims), a more usable PunchyDeluxe.
