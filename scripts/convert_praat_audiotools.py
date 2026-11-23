@@ -330,6 +330,16 @@ GUI_BLOCKING_OVERRIDES: dict[str, dict] = {
         },
         "why": "Custom matrix needs free text; All three leaves three Sounds",
     },
+    # New 2026-11-23 (6e1dc09). A live-microphone performance tool whose Demo window (status
+    # and STOP button) opens only in the live continuous source. Its PAUSE_HOISTS entry locks
+    # Source to "Selected Sound(s)", the one source this app can drive (one answer per Sound);
+    # "Test all six" leaves six Sounds where the driver keeps one.
+    "py/AudioTools_CallResponse.praat": {
+        "drop_options": {
+            "Transformation": ["Test all six (selected Sounds)"],
+        },
+        "why": "Demo window and pages are live-only; Source is locked to Selected Sound(s)",
+    },
     "Filter & Color/XMod.praat": {
         "drop_options": {
             "Mod_source": ["Second Sound (select 2 sounds)"],
@@ -1057,6 +1067,41 @@ PAUSE_HOISTS: dict[str, dict] = {
         "omit_rows": {0: ["TextGrid tier"]},
         "why": "advanced engine, phrase and order-test page",
     },
+    # New 2026-11-23 (6e1dc09). Seven fields (gesture detection, pairing, scheduling) behind
+    # `if advanced_settings`; the script assigns each above the `if`. Locked like the others
+    # (the user's choice).
+    # New 2026-11-23 (6e1dc09). Only "Selected Sound(s)" can run here (see its
+    # GUI_BLOCKING_OVERRIDES entry), and in that source every row below does nothing: the
+    # presets apply only under `source = 1`, and the rest configure the microphone, the live
+    # session and its sonic memory. They are locked at the form's own defaults, so the dialog
+    # keeps Transformation and Debug log (the user's choice). Corpus_C_folder is locked empty,
+    # as an empty folder row would block Apply. No page is hoisted (`blocks: []`): three are
+    # behind `source = 1`, and of the advanced page only Max_response_s would matter.
+    "py/AudioTools_CallResponse.praat": {
+        "blocks": [],
+        "lock_values": {
+            "Preset": "Custom (form and dialogs)",
+            "Source": "Selected Sound(s)",
+            "Cycles": 4,
+            "Input_device": "default",
+            "Output_device": "default",
+            "Sensitivity_dB": 9,
+            "Min_phrase_s": 0.5,
+            "End_silence_s": 0.6,
+            "Max_phrase_s": 12,
+            "Sonic_memory": True,
+            "Response_mode": "Hybrid (transform / recall / recall + transform)",
+            "Corpus_C_folder": "",
+            "Memory_settings": False,
+            "Playback_settings": False,
+            "Advanced_settings": False,
+        },
+        "why": "Selected Sound(s) source only; live-only rows locked at their defaults",
+    },
+    "Dynamics & Envelope/Gestural_Counterpoint.praat": {
+        "lock_on": ["Advanced_settings"],
+        "why": "advanced gesture-detection and scheduling page",
+    },
 }
 
 # Scripts that ask for a folder with `chooseDirectory$`, hoisted into a `ParamKind::FolderPath`
@@ -1443,7 +1488,7 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
     # assignments the rewrite emits sit *inside* the guard — so the toggle has to be forced on
     # or the hoisted values are silently ignored. Locked, because with the dialog gone it no
     # longer shows anything: it only decides whether the fields below take effect.
-    form_locks: list[tuple[str, int]] = []
+    form_locks: list[tuple[str, int | float | str]] = []
     for name in hoist.get("lock_on", []):
         param = next((p for p in form_params if p.name == name), None)
         if param is None:
@@ -1480,6 +1525,12 @@ def build_hoisted_processes(rel, top: str, stem: str, source: str, form_params: 
             if value not in param.options:
                 return f"{name!r} has no option {value!r} to lock to (upstream reworded it?)"
             number = param.options.index(value) + 1
+        # A numeric field takes a number and a text or folder field a string (assigned to
+        # `name$` by the rewrite), for rows that do nothing in the only mode the app can run.
+        elif param.kind == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = value
+        elif param.kind in ("text", "folder_path") and isinstance(value, str):
+            number = value
         else:
             return f"cannot lock {param.kind} {name!r} to {value!r}"
         dropped = form_params.index(param)
@@ -2535,7 +2586,7 @@ class Process:
     # Opens its own window and waits: the runner runs it unbounded. See PY_INTERACTIVE_IMPORTS.
     interactive: bool = False
     # Form fields deleted from the script and assigned instead, as (name, value): a toggle's
-    # 0/1 or a choice's 1-based option index -- see `lock_on` and `lock_values`.
+    # 0/1, a choice's 1-based option index, a number or a string -- see `lock_on` and `lock_values`.
     form_locks: list = field(default_factory=list)
     # The result always opens a new buffer, whatever Ctrl+B says. Emits `output_new_buffer`,
     # the flag CDP's MULTICHANNEL family uses. Set by a PAUSE_HOISTS entry's `new_buffer`.
@@ -3377,8 +3428,9 @@ PHOTO_INPUTS: dict[str, str] = {
 }
 
 # Notes the dialog shows in place of, or as well as, a script's own `comment` lines. `add` puts a
-# note above the named form row; `replace` swaps one comment's text for another. Both are loud
-# when the row or the text is gone, so an upstream edit is noticed instead of silently undone.
+# note above the named form row; `replace` swaps one comment's text for another; `remove` drops
+# one. All are loud when the row or the text is gone, so an upstream edit is noticed instead of
+# silently undone.
 NOTE_EDITS: dict[str, dict] = {
     # Presets set only the adaptive (right) channel's decays, and Balanced Memory repeats
     # Custom's defaults, so on a first listen the presets seem to do nothing. Asked 2026-11-03.
@@ -3391,6 +3443,11 @@ NOTE_EDITS: dict[str, dict] = {
     "py/Spectral_Noise_Shaping.praat": {
         "replace": {"(Manual only: presets set their own; Advanced shows and overrides all)":
                     "Variation and Spectral continuity apply under Manual; presets set their own"},
+    },
+    # The rows this heading named are locked (PAUSE_HOISTS), and the lock carried it onto Debug
+    # log, where it misleads. Asked 2026-11-23.
+    "py/AudioTools_CallResponse.praat": {
+        "remove": ["Sonic memory (continuous mode)"],
     },
 }
 
@@ -3409,6 +3466,13 @@ def apply_note_edits(params: list, edits: dict) -> str | None:
             return f"comment {old!r} found {len(hits)} times, expected once (upstream changed it?)"
         p, i, attr = hits[0]
         getattr(p, attr)[i] = Note(text=new, section=getattr(p, attr)[i].section)
+    for old in edits.get("remove", []):
+        hits = [(p, i, attr) for p in params for attr in ("notes", "notes_after")
+                for i, n in enumerate(getattr(p, attr)) if n.text == old]
+        if len(hits) != 1:
+            return f"comment {old!r} found {len(hits)} times, expected once (upstream changed it?)"
+        p, i, attr = hits[0]
+        del getattr(p, attr)[i]
     return None
 
 
@@ -3784,6 +3848,13 @@ def disambiguate(processes: list[Process]) -> list[str]:
 def toml_string(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     return f'"{escaped}"'
+
+
+def form_lock_toml(value) -> str:
+    """A `praat_form_locks` value: a string for a text field, else a number (`1`, `0.6`)."""
+    if isinstance(value, str):
+        return toml_string(value)
+    return str(int(value)) if float(value).is_integer() else repr(float(value))
 
 
 def toml_number(value: float) -> str:
@@ -4383,7 +4454,7 @@ def render_catalog(processes: list[Process], sha: str) -> str:
             )
             out.append(f"praat_argument_fixes = [{fixes}]")
         if proc.form_locks:
-            pairs = ", ".join(f"[{toml_string(n)}, {int(v)}]" for n, v in proc.form_locks)
+            pairs = ", ".join(f"[{toml_string(n)}, {form_lock_toml(v)}]" for n, v in proc.form_locks)
             out.append(f"praat_form_locks = [{pairs}]")
         if proc.output_new_buffer:
             out.append("output_new_buffer = true")

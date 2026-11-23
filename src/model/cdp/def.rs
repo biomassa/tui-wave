@@ -1042,6 +1042,22 @@ impl ScriptPreset {
     }
 }
 
+/// The fixed value of a Praat form field taken off the dialog (`praat_form_locks`). A number
+/// for `boolean`, menu and numeric fields; text for `word`/`sentence`/`text`/`folder` fields,
+/// which are assigned to the `$` variable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FormLockValue {
+    Number(f64),
+    Text(String),
+}
+
+impl From<f64> for FormLockValue {
+    fn from(value: f64) -> Self {
+        FormLockValue::Number(value)
+    }
+}
+
 /// A pause page that the dialog leaves out but the run can still reach.
 ///
 /// The rewrite replaces the page with these lines instead of deleting it, so the script sees
@@ -1196,9 +1212,10 @@ pub struct ProcessDef {
     ///
     /// The value is what the variable is assigned: 0/1 for a `boolean`, the 1-based option
     /// index for an `optionmenu`/`choice` (NMF Granular Spatial Composer's `Play` menu, whose
-    /// every other option plays the result inside Praat and holds up the run).
+    /// every other option plays the result inside Praat and holds up the run), a number for a
+    /// numeric field and a string for a text or folder field (Call & Response's live-only rows).
     #[serde(default)]
-    pub praat_form_locks: Vec<(String, f64)>,
+    pub praat_form_locks: Vec<(String, FormLockValue)>,
     /// True for a Praat process whose script tui-wave ships itself rather than running out of
     /// the praatAudioTools submodule — see `model::praat::builtin`, which holds the source and
     /// keys it by [`ProcessDef::key`].

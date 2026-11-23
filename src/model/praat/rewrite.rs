@@ -53,6 +53,7 @@
 //! entry was generated against and no longer describes.
 
 use std::collections::BTreeMap;
+use crate::model::cdp::def::FormLockValue;
 
 /// Why a script could not be rewritten. Every variant means the script no longer has the shape
 /// its catalog entry was generated against, which is a reason to fail the run loudly rather
@@ -366,8 +367,10 @@ fn render_number(value: f64) -> String {
 ///
 /// Indentation of the `beginPause` line is carried onto the generated lines, purely so a failed
 /// run's leftover script in the temp directory is still readable — Praat itself does not care.
-/// Remove a `boolean` or `optionmenu`/`choice` field from the script's `form` and assign its
-/// variable instead.
+/// Remove a field from the script's `form` and assign its variable instead: a `boolean` or
+/// `optionmenu`/`choice` (the original case), a numeric field, or a text/folder field (assigned
+/// to `name$`). Call & Response needed the last two: its live-only rows do nothing in the one
+/// source this app can run, and its empty corpus folder would otherwise block Apply.
 ///
 /// For a toggle that exists only to gate a hoisted block — `Show_advanced_settings` guarding an
 /// "advanced parameters" dialog. Once those parameters are in this app's own dialog the switch
@@ -387,7 +390,7 @@ fn render_number(value: f64) -> String {
 /// different list.
 fn apply_form_locks(
     lines: &mut Vec<String>,
-    locks: &[(String, f64)],
+    locks: &[(String, FormLockValue)],
 ) -> Result<(), RewriteError> {
     if locks.is_empty() {
         return Ok(());
@@ -408,16 +411,13 @@ fn apply_form_locks(
         // with the parse that produced the `lock_on` name -- and disagreement here is not a
         // no-op, it is the hard `MissingFormLock` below. Two of the eleven scripts hoisted in
         // the 2026-08-22 bump are written that way.
-        let mut menu = false;
+        let mut shape = FieldShape::Number;
         let position = lines.iter().position(|l| {
             let trimmed = l.trim();
-            let (rest, is_menu) = if let Some(rest) = trimmed.strip_prefix("boolean") {
-                (rest, false)
-            } else if let Some(rest) =
-                trimmed.strip_prefix("optionmenu").or_else(|| trimmed.strip_prefix("choice"))
-            {
-                (rest, true)
-            } else {
+            let Some((rest, field_shape)) = FORM_FIELD_KEYWORDS
+                .iter()
+                .find_map(|(keyword, kind)| trimmed.strip_prefix(keyword).map(|rest| (rest, *kind)))
+            else {
                 return false;
             };
             // The modern colon syntax quotes its label: `boolean: "Advanced_settings", 0`,
@@ -436,7 +436,9 @@ fn apply_form_locks(
                     after.chars().next().is_none_or(char::is_whitespace)
                 })
             };
-            menu = found && is_menu;
+            if found {
+                shape = field_shape;
+            }
             found
         });
         // Not finding it is an error rather than a no-op, for the reason a missing directory
@@ -449,20 +451,32 @@ fn apply_form_locks(
         };
         lines.remove(at);
         let variable = variable_name(label);
-        assignments.push(format!("{} = {}", variable, render_number(*value)));
-        if menu {
-            let mut options: Vec<String> = Vec::new();
-            while let Some(option) = lines.get(at).and_then(|l| menu_option_label(l)) {
-                options.push(option);
-                lines.remove(at);
+        // A value of the wrong kind for its field is the same drift as a missing field: the
+        // converter resolved it against a form that is no longer this one.
+        match (shape, value) {
+            (FieldShape::Text, FormLockValue::Text(text)) => {
+                assignments.push(format!("{}$ = \"{}\"", variable, text.replace('"', "\"\"")));
             }
-            let chosen = (*value >= 1.0 && value.fract() == 0.0)
-                .then(|| options.get(*value as usize - 1))
-                .flatten();
-            let Some(chosen) = chosen else {
-                return Err(RewriteError::MissingFormLock { label: label.clone() });
-            };
-            assignments.push(format!("{}$ = \"{}\"", variable, chosen.replace('"', "\"\"")));
+            (FieldShape::Number, FormLockValue::Number(number)) => {
+                assignments.push(format!("{} = {}", variable, render_number(*number)));
+            }
+            (FieldShape::Menu, FormLockValue::Number(number)) => {
+                assignments.push(format!("{} = {}", variable, render_number(*number)));
+                let mut options: Vec<String> = Vec::new();
+                while let Some(option) = lines.get(at).and_then(|l| menu_option_label(l)) {
+                    options.push(option);
+                    lines.remove(at);
+                }
+                let chosen = (*number >= 1.0 && number.fract() == 0.0)
+                    .then(|| options.get(*number as usize - 1))
+                    .flatten();
+                let Some(chosen) = chosen else {
+                    return Err(RewriteError::MissingFormLock { label: label.clone() });
+                };
+                assignments
+                    .push(format!("{}$ = \"{}\"", variable, chosen.replace('"', "\"\"")));
+            }
+            _ => return Err(RewriteError::MissingFormLock { label: label.clone() }),
         }
     }
     if let Some(at) = lines.iter().position(|l| l.trim() == "endform") {
@@ -472,6 +486,33 @@ fn apply_form_locks(
     }
     Ok(())
 }
+
+/// How a locked form field is assigned (`apply_form_locks`).
+#[derive(Clone, Copy)]
+enum FieldShape {
+    /// `boolean` and the numeric fields: `name = value`.
+    Number,
+    /// `optionmenu`/`choice`: `name = index`, `name$ = label`, and the option lines go too.
+    Menu,
+    /// The text fields, `folder` included: `name$ = "value"`.
+    Text,
+}
+
+/// The form field keywords a lock can remove. The matcher requires whitespace or a colon after
+/// the keyword, so `realvector` or a label that happens to start with `text` never matches.
+const FORM_FIELD_KEYWORDS: &[(&str, FieldShape)] = &[
+    ("boolean", FieldShape::Number),
+    ("optionmenu", FieldShape::Menu),
+    ("choice", FieldShape::Menu),
+    ("real", FieldShape::Number),
+    ("positive", FieldShape::Number),
+    ("integer", FieldShape::Number),
+    ("natural", FieldShape::Number),
+    ("word", FieldShape::Text),
+    ("sentence", FieldShape::Text),
+    ("text", FieldShape::Text),
+    ("folder", FieldShape::Text),
+];
 
 /// The label of an `option`/`button` line under a form menu, in either syntax: `option Soft`
 /// or `option: "Soft"`. `None` for any other line, which is where the menu ends.
@@ -642,7 +683,7 @@ fn numeric_assignment(line: &str) -> Option<(String, String)> {
 pub fn rewrite_pause_blocks(
     source: &str,
     blocks: &BTreeMap<usize, Vec<Assignment>>,
-    form_locks: &[(String, f64)],
+    form_locks: &[(String, FormLockValue)],
     button_override: Option<u32>,
 ) -> Result<String, RewriteError> {
     rewrite_pause_blocks_keeping(source, blocks, &BTreeMap::new(), form_locks, button_override)
@@ -655,7 +696,7 @@ pub fn rewrite_pause_blocks_keeping(
     source: &str,
     blocks: &BTreeMap<usize, Vec<Assignment>>,
     kept: &BTreeMap<usize, Vec<String>>,
-    form_locks: &[(String, f64)],
+    form_locks: &[(String, FormLockValue)],
     button_override: Option<u32>,
 ) -> Result<String, RewriteError> {
     let lines: Vec<&str> = source.lines()
@@ -1683,7 +1724,7 @@ mod form_lock_tests {
         let source = "form Test\n    real Amount 1.0\n    boolean Show_advanced_settings 0\nendform\n\
                       if show_advanced_settings\n    x = 1\nendif\n";
         let out = rewrite_pause_blocks(&source.replace('\\', ""), &BTreeMap::new(),
-                                       &[("Show_advanced_settings".into(), 1.0)], None)
+                                       &[("Show_advanced_settings".into(), 1.0.into())], None)
             .expect("rewrites");
 
         assert!(!out.contains("boolean Show_advanced_settings"), "the form field must be gone:\n{out}");
@@ -1706,7 +1747,7 @@ mod form_lock_tests {
     fn a_column_aligned_form_field_is_still_found() {
         let source = "form Test\n    boolean   Edit_details           0\n    \
                       boolean   Draw_visualization     1\nendform\nif edit_details\n    x = 1\nendif\n";
-        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0)], None)
+        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0.into())], None)
             .expect("rewrites");
 
         assert!(!out.contains("boolean   Edit_details"), "the aligned field must be gone:\n{out}");
@@ -1726,7 +1767,7 @@ mod form_lock_tests {
     fn a_colon_syntax_form_field_is_still_found() {
         let source = "form: \"Test\"\n    boolean: \"Advanced_settings\", 0\nendform\n\
                       if advanced_settings\n    x = 1\nendif\n";
-        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Advanced_settings".into(), 1.0)], None)
+        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Advanced_settings".into(), 1.0.into())], None)
             .expect("rewrites");
 
         assert!(!out.contains("boolean: \"Advanced_settings\""), "the field must be gone:\n{out}");
@@ -1739,7 +1780,7 @@ mod form_lock_tests {
     #[test]
     fn a_longer_label_sharing_the_prefix_is_not_matched() {
         let source = "form Test\n    boolean Edit_details_extra 0\nendform\n";
-        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0)], None)
+        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0.into())], None)
             .expect_err("must not match the longer label");
         assert!(matches!(err, RewriteError::MissingFormLock { .. }));
     }
@@ -1749,7 +1790,7 @@ mod form_lock_tests {
     #[test]
     fn a_longer_colon_syntax_label_sharing_the_prefix_is_not_matched() {
         let source = "form: \"Test\"\n    boolean: \"Edit_details_extra\", 0\nendform\n";
-        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0)], None)
+        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Edit_details".into(), 1.0.into())], None)
             .expect_err("must not match the longer label");
         assert!(matches!(err, RewriteError::MissingFormLock { .. }));
     }
@@ -1761,7 +1802,7 @@ mod form_lock_tests {
     #[test]
     fn a_lock_with_no_matching_field_is_an_error() {
         let source = "form Test\n    real Amount 1.0\nendform\n";
-        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Gone_toggle".into(), 1.0)], None)
+        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Gone_toggle".into(), 1.0.into())], None)
             .expect_err("a missing lock target must fail loudly");
         match err {
             RewriteError::MissingFormLock { label } => assert_eq!(label, "Gone_toggle"),
@@ -1776,7 +1817,7 @@ mod form_lock_tests {
     fn a_locked_menu_is_deleted_with_its_options_and_assigned_both_ways() {
         let source = "form Test\n    optionmenu Play: 1\n        option Auto (first)\n        \
                       option None\n    optionmenu Next: 1\n        option A\nendform\n";
-        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Play".into(), 2.0)], None)
+        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Play".into(), 2.0.into())], None)
             .expect("rewrites");
 
         assert!(!out.contains("Play:") && !out.contains("Auto (first)") && !out.contains("option None"),
@@ -1787,7 +1828,7 @@ mod form_lock_tests {
 
         let colon = "form: \"Test\"\n    optionmenu: \"Play\", 1\n        option: \"Auto\"\n        \
                      option: \"None\"\nendform\n";
-        let out = rewrite_pause_blocks(colon, &BTreeMap::new(), &[("Play".into(), 2.0)], None)
+        let out = rewrite_pause_blocks(colon, &BTreeMap::new(), &[("Play".into(), 2.0.into())], None)
             .expect("rewrites");
         assert!(!out.contains("option"), "colon-syntax options must go too:\n{out}");
         assert!(out.contains("play$ = \"None\""), "{out}");
@@ -1798,9 +1839,48 @@ mod form_lock_tests {
     #[test]
     fn a_menu_lock_past_the_last_option_is_an_error() {
         let source = "form Test\n    optionmenu Play: 1\n        option Auto\nendform\n";
-        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Play".into(), 3.0)], None)
+        let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[("Play".into(), 3.0.into())], None)
             .expect_err("an out-of-range option must fail");
         assert!(matches!(err, RewriteError::MissingFormLock { .. }));
+    }
+
+    /// Numeric and text fields can be locked too, in both syntaxes: a number is assigned to
+    /// `name`, text to `name$`. Call & Response's live-only rows are the case.
+    #[test]
+    fn numeric_and_text_fields_lock_to_their_variables() {
+        let source = "form: \"Test\"\n    natural: \"Cycles\", \"4\"\n    sentence: \"Input_device\", \"default\"\n\
+                      \x20   sentence: \"Corpus_C_folder\", \"\"\n    positive Sensitivity_dB 9\n\
+                      \x20   real: \"Keep\", \"1\"\nendform\n";
+        let locks = [
+            ("Cycles".to_string(), 4.0.into()),
+            ("Input_device".to_string(), FormLockValue::Text("de\"fault".into())),
+            ("Corpus_C_folder".to_string(), FormLockValue::Text(String::new())),
+            ("Sensitivity_dB".to_string(), 9.5.into()),
+        ];
+        let out = rewrite_pause_blocks(source, &BTreeMap::new(), &locks, None).expect("rewrites");
+        for gone in ["Cycles", "Input_device", "Corpus_C_folder", "Sensitivity_dB"] {
+            assert!(!out.lines().any(|l| l.contains(gone) && !l.contains('=')), "{gone} stayed:\n{out}");
+        }
+        assert!(out.contains("real: \"Keep\""), "an unlocked field must stay:\n{out}");
+        assert!(out.contains("cycles = 4\n"), "{out}");
+        assert!(out.contains("input_device$ = \"de\"\"fault\"\n"), "{out}");
+        assert!(out.contains("corpus_C_folder$ = \"\"\n"), "{out}");
+        assert!(out.contains("sensitivity_dB = 9.5\n"), "{out}");
+    }
+
+    /// A value of the wrong kind (text for a number field, a number for a text field) means the
+    /// catalog was made from a different form, so it fails like a missing field.
+    #[test]
+    fn a_lock_of_the_wrong_kind_is_an_error() {
+        let source = "form Test\n    natural Cycles 4\n    sentence Device default\nendform\n";
+        for lock in [
+            ("Cycles".to_string(), FormLockValue::Text("4".into())),
+            ("Device".to_string(), 1.0.into()),
+        ] {
+            let err = rewrite_pause_blocks(source, &BTreeMap::new(), &[lock], None)
+                .expect_err("a mismatched kind must fail");
+            assert!(matches!(err, RewriteError::MissingFormLock { .. }));
+        }
     }
 
     /// No locks means the form is untouched — every other process must be unaffected.

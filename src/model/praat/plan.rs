@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use super::driver::{driver_script, DriverArg, DriverError, DriverOptions};
 use super::rewrite::Assignment;
-use crate::model::cdp::def::{Backend, IoKind, ParamDef, ParamKind, ParamValue, ProcessDef};
+use crate::model::cdp::def::{Backend, FormLockValue, IoKind, ParamDef, ParamKind, ParamValue, ProcessDef};
 
 /// Temp-file names inside the job's own directory. Fixed rather than generated: the directory
 /// is per-job and disposable, so there is nothing to collide with, and a fixed name makes a
@@ -131,7 +131,7 @@ pub struct PauseRewrite {
     /// For a switch that exists only to gate a hoisted block: once its parameters are in this
     /// app's dialog the switch controls nothing, so it is removed rather than shown as a
     /// checkbox that refuses to be clicked.
-    pub form_locks: Vec<(String, f64)>,
+    pub form_locks: Vec<(String, FormLockValue)>,
     /// Folders picked in this app's own dialog, standing in for the `chooseDirectory$` modals the
     /// script would otherwise open, as (variable including its `$`, absolute path). See
     /// `rewrite::rewrite_directory_choosers`.
@@ -401,7 +401,7 @@ pub fn plan_praat_job_with(
     }
 
     let script_path = audiotools_dir.join(&def.bin);
-    let form_locks: Vec<(String, f64)> = def.praat_form_locks.clone();
+    let form_locks: Vec<(String, FormLockValue)> = def.praat_form_locks.clone();
     // A script with no dialog to rewrite still needs a copy when it carries the branch-scoped
     // variable defect — see `rewrite::repair_branch_scoped_variables`. Detected by reading the
     // script here rather than recorded in the catalog, so it is re-derived every run and an

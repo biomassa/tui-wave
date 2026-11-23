@@ -570,7 +570,9 @@ python_command$ = \"py\"
         // Plus Generative_Exploration_Map, the first flagged entry outside `py/`.
         // 53 -> 54 on 2026-11-17: the 8e43c32 bump brought `Distributed_Sound_Ecology`
         // (numpy/scipy/soundfile only). Upstream deleted `Live_1`, which was never planned.
-        assert_eq!(flagged, 54, "the py group plus PYTHON_ELSEWHERE is 54 processes");
+        // 54 -> 55 on 2026-11-23: the 6e1dc09 bump made `AudioTools_CallResponse` runnable in
+        // its Selected Sound(s) source, with its live-only rows locked.
+        assert_eq!(flagged, 55, "the py group plus PYTHON_ELSEWHERE is 55 processes");
     }
 
     /// End to end through the planner: a py-group process must come out asking for a rewritten

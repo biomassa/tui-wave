@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- **Airwindows updated to the latest upstream**, which adds
+  **WoodenChest** (Tone Color), a slightly bigger reverb for turning
+  DI into acoustic sound.
+- **praatAudioTools updated to `6e1dc09`.**
+  - **New:** Stochastic Caesura (Dynamics) and Gestural Counterpoint
+    (Dynamics). Gestural Counterpoint's advanced settings are in the
+    dialog.
+  - **New:** Call & Response (py), with the Selected Sound(s) source
+    only. It analyses the sound and answers with one of six
+    AudioTools transformations, chosen automatically or by you. Its
+    live microphone modes and the 'Test all six' option are left out.
+  - Not included: Stochastic Composer. It is an interactive
+    accept/reject session in Praat's Demo window, which cannot open
+    here.
+  - **Rewritten upstream, with new settings:** Causal Recomposer and
+    Genetic Recomposer. Saved presets for these two no longer line up.
+  - **Math Operations** changed some operations' sound (Wavefold,
+    Quantizer, Logistic-style, Power mod, XOR-like); Fold passes now
+    defaults to 0, a complete fold. HMM Timbre Sequencing is faster,
+    with the same sound.
+
 ## 2026-11-17 (2.20.1)
 
 - **Airwindows updated to the latest upstream**, which adds
