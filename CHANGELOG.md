@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2026-11-24 (2.20.2)
 
 - **Airwindows updated to the latest upstream**, which adds
   **WoodenChest** (Tone Color), a slightly bigger reverb for turning
